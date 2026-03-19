@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://pixijs.download/release/pixi.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
+    <style>
+        body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; }
+        #dropzone { width: 300px; height: 100vh; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; }
+        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; }
+        .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12; }
+    </style>
+</head>
+<body>
+    <div id="dropzone">
+        <h2>Drag .aoe2record Here</h2>
+        <div id="status" style="color: #f39c12; margin-bottom: 10px;">Loading Python engine...</div>
+        <pre id="output" style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #2ecc71;"></pre>
+    </div>
+    <div id="canvas-container"></div>
+
+    <script>
+        const app = new PIXI.Application({ width: 800, height: 600, backgroundColor: 0x1099bb });
+        document.getElementById('canvas-container').appendChild(app.view);
+
+        let pyodideInstance;
+
+        // 2. Initialize Python Runtime in the Browser
+        async function initPython() {
+            pyodideInstance = await loadPyodide();
+            await pyodideInstance.loadPackage("micropip");
+            const micropip = pyodideInstance.pyimport("micropip");
+            
+            // Install the aoc-mgz parser dynamically into the browser's RAM
+            await micropip.install("aoc-mgz");
+            document.getElementById('status').innerText = "System Ready. Drop file.";
+            document.getElementById('status').style.color = "#2ecc71";
+        }
+        initPython();
+
+        // 3. Handle File & Parse Locally (No Server)
+        const dropzone = document.getElementById('dropzone');
+        const output = document.getElementById('output');
+
+        dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
+        dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
+        dropzone.ondrop = async (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('drag-over');
+            
+            if (!pyodideInstance) { output.innerText = "Python engine still loading..."; return; }
+            
+            const file = e.dataTransfer.files[0];
+            output.innerText = "Parsing binary locally...";
+
+            // Read file as ArrayBuffer for Python
+            const arrayBuffer = await file.arrayBuffer();
+            const uint8Array = new Uint8Array(arrayBuffer);
+            
+            // Write to Pyodide's virtual file system
+            pyodideInstance.FS.writeFile('/replay.aoe2record', uint8Array);
+
+            // 4. Execute Python code directly inside JS
+            const pyCode = `
+import json
+from mgz.summary import Summary
+
+try:
+    with open('/replay.aoe2record', 'rb') as f:
+        summary = Summary(f)
+        payload = {
+            "duration": summary.get_duration(),
+            "players": [{"name": p['name'], "civ": p['civilization']} for p in summary.get_players()]
+        }
+    result = json.dumps({"status": "success", "data": payload})
+except Exception as e:
+    result = json.dumps({"status": "error", "message": str(e)})
+result
+            `;
+
+            const jsonResponse = pyodideInstance.runPython(pyCode);
+            const parsedData = JSON.parse(jsonResponse);
+            
+            output.innerText = JSON.stringify(parsedData, null, 2);
+
+            if (parsedData.status === "success") {
+                const square = new PIXI.Graphics();
+                square.beginFill(0xf39c12).drawRect(Math.random()*700, Math.random()*500, 50, 50).endFill();
+                app.stage.addChild(square);
+            }
+        };
+    </script>
+</body>
+</html>
