@@ -145,7 +145,10 @@
 
                     Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
                     AgeVisState.pyodide = await loadPyodide();
-                    await AgeVisState.pyodide.loadPackage("micropip"); 
+                    
+                    // Explicitly load unvendored Pyodide standard libraries
+                    await AgeVisState.pyodide.loadPackage(["micropip", "hashlib"]); 
+                    
                     await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
                     
                     Logger.status("System Ready. Drop or Select File", "#2ecc71");
@@ -185,10 +188,9 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
-# --- THE WASM-JS DECOMPRESSION BRIDGE ---
+# --- ZSTD DECOMPRESSION BRIDGE ---
 class JSDecompressor:
     def decompress(self, data, *args, **kwargs):
-        # Pass Python bytes to JavaScript, run fzstd, return uncompressed bytes
         js_data = pyodide.ffi.to_js(data)
         decompressed = js.window.fzstd.decompress(js_data)
         return bytes(decompressed)
@@ -211,6 +213,7 @@ try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
         
+        # VRAM FIX: Filter out Gaia objects
         init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")} for o in summary.get_objects() if o.get("instance_id") is not None and o.get("player_number") in [1, 2, 3, 4, 5, 6, 7, 8]]
         
         commands = []
