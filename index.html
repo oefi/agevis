@@ -243,13 +243,22 @@ const Core = {
             Tooltip.init();
 
             Logger.log('Fetching Genie Engine unit data…');
-            const res   = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
-            const raw   = await res.json();
-            const uData = raw.data?.units     || raw.units     || {};
-            const bData = raw.data?.buildings || raw.buildings || {};
+            const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
+            if (!res.ok) throw new Error(`data.json fetch failed: ${res.status} ${res.statusText}`);
+            const raw = await res.json();
+
+            // aoe2techtree structure can vary — probe all known paths
+            const topKeys = Object.keys(raw).slice(0, 8);
+            Logger.log(`data.json top-level keys: [${topKeys.join(', ')}]`);
+            const uData = raw.data?.units    ?? raw.units    ?? raw.data?.Units    ?? {};
+            const bData = raw.data?.buildings ?? raw.buildings ?? raw.data?.Buildings ?? {};
+            Logger.log(`Unit entries: ${Object.keys(uData).length}, Building entries: ${Object.keys(bData).length}`);
+
             Object.values(uData).forEach(u => { AgeVisState.aoeData[u.ID ?? u.id] = { ...u, render_shape: 'circle', size: 2 }; });
             Object.values(bData).forEach(b => { AgeVisState.aoeData[b.ID ?? b.id] = { ...b, render_shape: 'square', size: 5 }; });
-            Logger.log(`${Object.keys(AgeVisState.aoeData).length} unit/building definitions loaded.`, 'success');
+            const defined = Object.keys(AgeVisState.aoeData).length;
+            if (defined === 0) Logger.log('WARNING: 0 unit definitions loaded — unit labels will fall back to type IDs. Check data.json key paths above.', 'warning');
+            else Logger.log(`${defined} unit/building definitions loaded.`, 'success');
 
             Logger.log('Initializing Pyodide WASM runtime…');
             AgeVisState.pyodide = await loadPyodide();
@@ -296,73 +305,125 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site, filter="data")
     sys.path.append(f"{site}/{meta['info']['name']}-{meta['info']['version']}")
 
-await install_tarball("construct", "2.10.67")
+await install_tarball("construct", "2.8.22")
 await install_tarball("mgz")
     `,
 
-    // Single-pass extractor: entities, gaia, commands, APM timestamps, age-ups.
+    // Single-pass extractor — written against mgz 1.8.51 / ModelSummary API.
+    //
+    // Key API facts discovered from source inspection:
+    //  • get_objects() → dict {"objects":[...], "tcs":...} — NOT a bare list
+    //  • object type field is "object_id", NOT "object_type"
+    //  • gaia player_number is None, NOT 0
+    //  • get_map()["size"] is a string ("Large") — use ["dimension"] for the int
+    //  • tile terrain field is "terrain_id", NOT "terrain_type"
+    //  • get_commands() does not exist — use match.actions (Action dataclasses)
+    //  • action.timestamp is timedelta — call .total_seconds()*1000 for ms
+    //  • coordinates are in action.position (moved by enrich_action), not payload
+    //  • age-ups are in match.uptimes (Uptime dataclasses), not RESEARCH actions
+    //  • get_players() returns civilization as int (ID) — use match.players for name
     PY_EXTRACT: `
 import json, traceback
 from mgz.summary import Summary
+from mgz.fast import Action as ActionEnum
 
 PLAYER_IDS   = {1, 2, 3, 4, 5, 6, 7, 8}
 RESOURCE_IDS = {66: "gold", 102: "stone", 285: "relic"}
-AGE_TECH_IDS = {101: "Feudal", 102: "Castle", 103: "Imperial"}
+AGE_MAP      = {"FEUDAL_AGE": "Feudal", "CASTLE_AGE": "Castle", "IMPERIAL_AGE": "Imperial"}
+# All action types that produce meaningful unit displacement
+MOVE_TYPES   = {ActionEnum.MOVE, ActionEnum.ORDER, ActionEnum.PATROL, ActionEnum.DE_ATTACK_MOVE}
 
 try:
     with open("/replay.rec", "rb") as f:
         s = Summary(f)
 
-    all_objs = s.get_objects()
+    # get_objects() returns dict {"objects":[...], "tcs":...}, NOT a bare list
+    obj_wrap = s.get_objects()
+    all_objs = obj_wrap.get("objects", []) if isinstance(obj_wrap, dict) else list(obj_wrap)
 
-    # VRAM: exclude Gaia from the WebGL entity pool
+    # Type field is "object_id"; gaia has player_number=None (not 0)
     init_objs = [
         {"id": o.get("instance_id"), "p": o.get("player_number"),
-         "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")}
+         "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_id")}
         for o in all_objs
         if o.get("instance_id") is not None and o.get("player_number") in PLAYER_IDS
     ]
-
-    # Gaia resources baked onto the HTML5 terrain canvas (zero WebGL cost)
     gaia = [
-        {"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_IDS[o.get("object_type")]}
+        {"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_IDS[o.get("object_id")]}
         for o in all_objs
-        if o.get("player_number") == 0
-        and o.get("object_type") in RESOURCE_IDS
+        if o.get("player_number") is None
+        and o.get("object_id") in RESOURCE_IDS
         and o.get("x") is not None
     ]
+
+    # map_data["size"] is a string ("Large"); use "dimension" for the tile count
+    map_data = s.get_map()
+    dim = map_data.get("dimension") or map_data.get("size")
+    if isinstance(dim, str):
+        SIZE_LUT = {"Tiny":72,"Small":96,"Medium":120,"Normal":120,
+                    "Large":144,"Giant":168,"Ludikris":200}
+        dim = SIZE_LUT.get(dim, 120)
+    # tile terrain field is "terrain_id", not "terrain_type"
+    tiles = [
+        [t.get("terrain_id") or t.get("terrain_type", 0), t.get("elevation", 0)]
+        for t in map_data.get("tiles", [])
+    ]
+
+    # Players — use match.players directly for the civilization string name.
+    # get_players() returns civilization as an int (the ID), not the name string.
+    players = []
+    if hasattr(s, "match"):
+        for p in sorted(s.match.players, key=lambda x: x.number):
+            players.append({"name": p.name,
+                            "civ":  p.civilization or str(p.civilization_id),
+                            "color": p.color_id})
+    else:
+        for p in s.get_players():
+            civ = p.get("civilization")
+            players.append({"name": p["name"],
+                            "civ":  civ if isinstance(civ, str) else str(civ or "?"),
+                            "color": p["color_id"]})
 
     commands = []
     apm_ts   = {"1": [], "2": []}
 
-    for cmd in s.get_commands():
-        pid   = cmd.get("player_id")
-        ts    = cmd.get("timestamp", 0)
-        ctype = cmd.get("type", "")
+    if hasattr(s, "match"):
+        # ModelSummary path (DE replays). Action is a dataclass:
+        #   timestamp: timedelta, type: ActionEnum,
+        #   payload: dict, player: Player|None, position: Position|None
+        # enrich_action() moves x/y from payload into action.position.
+        for action in s.match.actions:
+            ts  = int(action.timestamp.total_seconds() * 1000)
+            pid = action.player.number if action.player else None
+            if pid in (1, 2):
+                apm_ts[str(pid)].append(ts)
 
-        if pid in (1, 2):
-            apm_ts[str(pid)].append(ts)
+            ids = action.payload.get("object_ids")
+            if action.type in MOVE_TYPES and action.position and ids:
+                commands.append({"t": ts, "type": "move", "ids": ids,
+                                 "x": action.position.x, "y": action.position.y, "p": pid})
+            elif action.type is ActionEnum.BUILD and action.position and ids:
+                commands.append({"t": ts, "type": "move", "ids": ids,
+                                 "x": action.position.x, "y": action.position.y, "p": pid})
+            elif action.type is ActionEnum.DELETE and ids:
+                commands.append({"t": ts, "type": "delete", "ids": ids})
+            elif action.type is ActionEnum.RESIGN and pid:
+                commands.append({"t": ts, "type": "resign", "p": pid})
 
-        if ctype in ("move", "build") and "position" in cmd and "object_ids" in cmd:
-            commands.append({"t": ts, "type": "move", "ids": cmd["object_ids"],
-                             "x": cmd["position"][0], "y": cmd["position"][1], "p": pid})
-        elif ctype == "delete" and "object_ids" in cmd:
-            commands.append({"t": ts, "type": "delete", "ids": cmd["object_ids"]})
-        elif ctype == "resign":
-            commands.append({"t": ts, "type": "resign", "p": pid})
-        elif ctype == "research" and cmd.get("technology_id") in AGE_TECH_IDS:
-            commands.append({"t": ts, "type": "age_up",
-                             "p": pid, "age": AGE_TECH_IDS[cmd["technology_id"]]})
+        # Age-ups via Uptime dataclasses (chat-based, more reliable than RESEARCH).
+        # Uptime fields: timestamp: timedelta, age: AgeEnum, player: Player
+        for uptime in s.match.uptimes:
+            ts   = int(uptime.timestamp.total_seconds() * 1000)
+            pid  = uptime.player.number if uptime.player else None
+            aname = AGE_MAP.get(uptime.age.name if uptime.age else "", "")
+            if pid and aname:
+                commands.append({"t": ts, "type": "age_up", "p": pid, "age": aname})
 
-    map_data = s.get_map()
-    payload  = {
+    payload = {
         "duration":  s.get_duration(),
-        "map_size":  map_data["size"],
-        "tiles":     [[t["terrain_type"], t["elevation"]] for t in map_data["tiles"]],
-        "players":   [{"name": p["name"],
-                       "civ":  p.get("civilization") or str(p.get("civilization_id", "?")),
-                       "color": p["color_id"]}
-                      for p in s.get_players()],
+        "map_size":  dim,
+        "tiles":     tiles,
+        "players":   players,
         "objects":   init_objs,
         "commands":  commands,
         "gaia":      gaia,
