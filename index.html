@@ -3,21 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <title>AgeVis - AoE2 Replay Visualizer</title>
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=">
     <script src="https://pixijs.download/release/pixi.js"></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
     <style>
         body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
-        #sidebar { width: 350px; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; display: flex; flex-direction: column; }
-        #main-view { flex-grow: 1; display: flex; flex-direction: column; background: #111; }
-        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; }
-        #playback-bar { height: 60px; background: #222; border-top: 2px solid #444; display: flex; align-items: center; padding: 0 20px; gap: 15px; }
+        #sidebar { width: 350px; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; display: flex; flex-direction: column; z-index: 10; }
+        #main-view { flex-grow: 1; display: flex; flex-direction: column; background: #111; position: relative; }
+        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        #playback-bar { height: 60px; background: #222; border-top: 2px solid #444; display: flex; align-items: center; padding: 0 20px; gap: 15px; z-index: 10; }
         #timeline { flex-grow: 1; cursor: pointer; }
         .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12 !important; }
-        .stats-box { background: #1a1a1a; padding: 10px; border-radius: 4px; font-size: 14px; }
-        .log { color: #2ecc71; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; max-height: 150px; margin-top: auto; border-top: 2px solid #444; }
+        .stats-box { background: #1a1a1a; padding: 10px; border-radius: 4px; font-size: 14px; margin-bottom: 15px; }
+        .log { color: #2ecc71; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; max-height: 150px; margin-top: auto; border-top: 2px solid #444; margin-bottom: 0; }
         button { background: #f39c12; color: #111; border: none; padding: 6px 12px; font-weight: bold; cursor: pointer; border-radius: 3px; }
         button:hover { background: #e67e22; }
-        #btn-speed { background: #444; color: white; }
+        #btn-speed { background: #444; color: white; width: 45px; }
     </style>
 </head>
 <body>
@@ -28,7 +29,7 @@
             <span id="status" style="color: #f39c12;">Initializing Engine...</span>
         </div>
         
-        <div class="stats-box" id="p1-card" style="border-left: 4px solid #0000FF; display: none; margin-bottom: 15px;">
+        <div class="stats-box" id="p1-card" style="border-left: 4px solid #0000FF; display: none;">
             <strong id="p1-name" style="font-size: 16px;">P1</strong> <span id="p1-civ" style="color: #aaa; font-size: 12px;"></span>
             <hr style="border: 1px solid #333; margin: 8px 0;">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px;">
@@ -54,19 +55,17 @@
         <div id="playback-bar">
             <button id="btn-play">▶ Play</button>
             <button id="btn-speed">1x</button>
-            <span id="time-display" style="font-family: monospace;">00:00:00</span>
+            <span id="time-display" style="font-family: monospace; font-size: 14px; width: 65px;">00:00:00</span>
             <input type="range" id="timeline" min="0" max="100" value="0" disabled>
         </div>
     </div>
 
     <script>
         // --- 1. GLOBALS & CONSTANTS ---
-        const CANVAS_SIZE = 700;
-        const app = new PIXI.Application({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x2a2a2a });
-        document.getElementById('canvas-container').appendChild(app.view);
+        const CANVAS_SIZE = 750;
+        const app = new PIXI.Application(); 
         const mapContainer = new PIXI.Container();
-        app.stage.addChild(mapContainer);
-
+        
         const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
         
         let pyodideInstance, ageVisData = null, entityPaths = {};
@@ -76,11 +75,17 @@
         let isPlaying = false, currentPlayTime = 0, lastFrameTime = 0;
         let playbackSpeed = 1; 
         const speedCycle = [1, 2, 4, 8];
+        let staticBackground;
 
         // --- 2. ENVIRONMENT BOOT ---
         async function initEnvironment() {
             const stat = document.getElementById('status');
             try {
+                // v8 Async Canvas Initialization
+                await app.init({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x111111 });
+                document.getElementById('canvas-container').appendChild(app.canvas);
+                app.stage.addChild(mapContainer);
+
                 stat.innerText = "Hydrating Engine Data (3MB)...";
                 const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
                 const rawEngineData = await res.json();
@@ -134,9 +139,13 @@ try:
             elif cmd['type'] == 'resign':
                 commands.append({"t": cmd['timestamp'], "type": "resign", "p": cmd['player_id']})
 
+        map_data = summary.get_map()
+        optimized_tiles = [[t['terrain_type'], t['elevation']] for t in map_data['tiles']]
+
         payload = {
             "duration": summary.get_duration(),
-            "map_size": summary.get_map()['size'],
+            "map_size": map_data['size'],
+            "tiles": optimized_tiles,
             "players": [{"name": p['name'], "civ": p['civilization'], "color": p['color_id']} for p in summary.get_players()],
             "objects": init_objs,
             "commands": commands
@@ -152,8 +161,9 @@ result
                 ageVisData = parsed.data;
                 compileEntityPaths();
                 calculateCombatDeaths();
+                generateProceduralMap();
                 initAgeVisUI();
-                document.getElementById('output').innerText = `Parse Complete.\nEntities: ${Object.keys(entityPaths).length}`;
+                document.getElementById('output').innerText = `Parse Complete.\nEntities: ${Object.keys(entityPaths).length}\nTiles: ${ageVisData.tiles.length}`;
             } else {
                 document.getElementById('output').innerText = "Error: " + parsed.message;
             }
@@ -165,7 +175,8 @@ result
             let pos = { x: path[0].x, y: path[0].y, p: path[0].p };
             for (let i = 0; i < path.length - 1; i++) {
                 if (targetTimeMs >= path[i].t && targetTimeMs <= path[i+1].t) {
-                    const prog = (targetTimeMs - path[i].t) / (path[i+1].t - path[i].t);
+                    const dt = path[i+1].t - path[i].t;
+                    const prog = dt === 0 ? 1 : (targetTimeMs - path[i].t) / dt;
                     pos.x = path[i].x + (path[i+1].x - path[i].x) * prog;
                     pos.y = path[i].y + (path[i+1].y - path[i].y) * prog;
                     return { pos, isMoving: true, lastT: path[i].t };
@@ -201,9 +212,11 @@ result
                     const path = entityPaths[unitId];
                     let lastNode = path[path.length - 1];
 
+                    // Interruption Logic
                     if (lastNode.t > cmd.t) {
-                        const prevNode = path[path.length - 2];
-                        const prog = (cmd.t - prevNode.t) / (lastNode.t - prevNode.t);
+                        const prevNode = path[path.length - 2] || path[0];
+                        const dt = lastNode.t - prevNode.t;
+                        const prog = dt === 0 ? 1 : (cmd.t - prevNode.t) / dt;
                         lastNode.t = cmd.t;
                         lastNode.x = prevNode.x + (lastNode.x - prevNode.x) * prog;
                         lastNode.y = prevNode.y + (lastNode.y - prevNode.y) * prog;
@@ -212,6 +225,7 @@ result
                         lastNode = path[path.length - 1];
                     }
 
+                    // Kinematic Math
                     const dist = Math.sqrt(Math.pow(cmd.x - lastNode.x, 2) + Math.pow(cmd.y - lastNode.y, 2));
                     const travelMs = (dist / (lastNode.speed > 0 ? lastNode.speed : 1.1)) * 1000;
                     path.push({ t: cmd.t + travelMs, x: cmd.x, y: cmd.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
@@ -236,13 +250,51 @@ result
                     if (!eState) continue;
                     
                     if (Math.sqrt(Math.pow(lastNode.x - eState.pos.x, 2) + Math.pow(lastNode.y - eState.pos.y, 2)) <= 8) {
-                        path.deathTime = lastNode.t + 3000; break;
+                        path.deathTime = lastNode.t + 3000; 
+                        break;
                     }
                 }
             });
         }
 
-        // --- 6. UI & PLAYBACK ---
+        // --- 6. TERRAIN GENERATOR ---
+        function generateProceduralMap() {
+            if (staticBackground) { app.stage.removeChild(staticBackground); staticBackground.destroy(); }
+            
+            staticBackground = new PIXI.Graphics();
+            const size = ageVisData.map_size;
+            const tileSize = CANVAS_SIZE / size;
+
+            const terrainColors = {
+                0: 0x3b823b, 1: 0x2A3B9A, 2: 0x1E592F, 9: 0x3d7031, 
+                10: 0x112E0E, 12: 0x82643a, 13: 0x6e522b, 14: 0xab8854, 
+                19: 0x183815, 22: 0x1A2B15, 24: 0x999999, default: 0x4a5e3d
+            };
+
+            let tileIndex = 0;
+            for (let x = 0; x < size; x++) {
+                for (let y = 0; y < size; y++) {
+                    const tile = ageVisData.tiles[tileIndex];
+                    const cX = x * tileSize, cY = CANVAS_SIZE - ((y + 1) * tileSize);
+
+                    staticBackground.beginFill(terrainColors[tile[0]] || terrainColors.default);
+                    staticBackground.drawRect(cX, cY, tileSize, tileSize);
+                    staticBackground.endFill();
+
+                    if (tile[1] > 0) {
+                        staticBackground.beginFill(0xFFFFFF, tile[1] * 0.12);
+                        staticBackground.drawRect(cX, cY, tileSize, tileSize);
+                        staticBackground.endFill();
+                    }
+                    tileIndex++;
+                }
+            }
+
+            // Ensure terrain rests at the very back
+            app.stage.addChildAt(staticBackground, 0); 
+        }
+
+        // --- 7. UI & PLAYBACK ---
         function initAgeVisUI() {
             const tl = document.getElementById('timeline');
             tl.max = ageVisData.duration; tl.disabled = false; tl.value = 0;
@@ -279,24 +331,26 @@ result
             if (!isPlaying) return;
             currentPlayTime += (ts - lastFrameTime) * playbackSpeed;
             lastFrameTime = ts;
-            if (currentPlayTime > ageVisData.duration) { currentPlayTime = ageVisData.duration; isPlaying = false; document.getElementById('btn-play').innerText = "▶ Play"; }
+            
+            if (currentPlayTime > ageVisData.duration) { 
+                currentPlayTime = ageVisData.duration; 
+                isPlaying = false; 
+                document.getElementById('btn-play').innerText = "▶ Play"; 
+            }
+            
             document.getElementById('timeline').value = currentPlayTime;
             renderMapState(currentPlayTime);
+            
             if (isPlaying) requestAnimationFrame(playbackLoop);
         }
 
-        // --- 7. RENDER & TELEMETRY ---
+        // --- 8. RENDERER & TELEMETRY ---
         function renderMapState(timeMs) {
             if (!ageVisData) return;
             document.getElementById('time-display').innerText = new Date(timeMs).toISOString().substr(11, 8);
             
             mapContainer.removeChildren();
             const scale = CANVAS_SIZE / ageVisData.map_size;
-            
-            const bg = new PIXI.Graphics();
-            bg.beginFill(0x334433).drawRect(0, 0, CANVAS_SIZE, CANVAS_SIZE).endFill();
-            mapContainer.addChild(bg);
-
             let stats = { 1: { pA: 0, pT: 0, bA: 0, bT: 0 }, 2: { pA: 0, pT: 0, bA: 0, bT: 0 } };
 
             Object.keys(entityPaths).forEach(id => {
@@ -306,18 +360,20 @@ result
                 const base = path[0];
                 const isDead = path.deathTime && timeMs >= path.deathTime;
                 
-                // Telemetry
+                // Sidebar Telemetry Aggregation
                 if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
                     const isBld = base.shape === 'square' || base.shape === 'building';
                     if (isBld) { stats[base.p].bT++; if (!isDead) stats[base.p].bA++; } 
                     else { stats[base.p].pT++; if (!isDead) stats[base.p].pA++; }
                 }
 
+                // Culling Check
                 if (isDead || timeMs < base.t) return;
 
                 const state = getPositionAtTime(path, timeMs);
                 let alpha = 1.0;
                 
+                // Stale Intel Visual Degradation
                 if (!state.isMoving && timeMs > state.lastT) {
                     const idle = timeMs - state.lastT;
                     if (idle > 60000) alpha = Math.max(0.3, 1.0 - ((idle - 60000) / 60000));
@@ -339,6 +395,7 @@ result
                 mapContainer.addChild(g);
             });
 
+            // Update DOM once per frame
             if (document.getElementById('p1-card').style.display === 'block') {
                 document.getElementById('p1-pop').innerText = `${stats[1].pA} / ${stats[1].pT}`;
                 document.getElementById('p1-bld').innerText = `${stats[1].bA} / ${stats[1].bT}`;
