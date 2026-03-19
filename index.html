@@ -46,7 +46,6 @@
                 <div>Buildings:</div> <div id="p2-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
             </div>
         </div>
-
         <div class="log" id="output"></div>
     </div>
 
@@ -61,134 +60,111 @@
     </div>
 
     <script>
-        // --- 1. GLOBALS & CONSTANTS ---
-        const CANVAS_SIZE = 750;
-        const app = new PIXI.Application(); 
-        const mapContainer = new PIXI.Container();
-        
-        const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
-        
-        let pyodideInstance, ageVisData = null, entityPaths = {};
-        let AOE_DAT = {}; 
-        const FALLBACK_STAT = { render_shape: "circle", speed: 1.1, size: 2 };
+        // ==========================================
+        // 1. CONFIGURATION & GLOBAL STATE EXPOSURE
+        // ==========================================
+        const Config = {
+            CANVAS_SIZE: 750,
+            COLORS: { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF },
+            TERRAIN_COLORS: { 0: '#3b823b', 1: '#2A3B9A', 2: '#1E592F', 9: '#3d7031', 10: '#112E0E', 12: '#82643a', 13: '#6e522b', 14: '#ab8854', 19: '#183815', 22: '#1A2B15', 24: '#999999', default: '#4a5e3d' },
+            SPEED_CYCLE: [1, 2, 4, 8, 16]
+        };
 
-        let isPlaying = false, currentPlayTime = 0, lastFrameTime = 0;
-        let playbackSpeed = 1; 
-        const speedCycle = [1, 2, 4, 8];
-        let staticBackground;
-        let mapScale = 1;
+        // EXPOSED TO DEVTOOLS: Type 'AgeVisState' in browser console to debug
+        window.AgeVisState = {
+            pyodide: null,
+            aoeData: {}, 
+            rawPayload: null,
+            paths: {}, // { entityId: { path: [], gfx: PIXI.Graphics, drawn: bool } }
+            mapScale: 1,
+            playback: { isPlaying: false, currentTime: 0, lastFrameTime: 0, speed: 1 },
+            pixi: { app: new PIXI.Application(), container: new PIXI.Container(), bg: null }
+        };
 
-        // --- 2. SYSTEM LOGGER ---
-        function logSystem(message, type = "info") {
-            const out = document.getElementById('output');
-            const colors = { info: "#3498db", success: "#2ecc71", error: "#e74c3c", warning: "#f39c12" };
-            const time = new Date().toLocaleTimeString([], { hour12: false });
-            out.innerHTML = `<span style="color: #777;">[${time}]</span> <span style="color: ${colors[type]};">${message}</span><br>` + out.innerHTML;
-        }
-
-        // --- 3. ENVIRONMENT BOOT ---
-        async function initEnvironment() {
-            const stat = document.getElementById('status');
-try {
-                logSystem("Booting PixiJS v8 WebGL engine...", "info");
-                await app.init({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x111111 });
-                document.getElementById('canvas-container').appendChild(app.canvas);
-                app.stage.addChild(mapContainer);
-
-                logSystem("Fetching Genie Engine Data (3MB)...", "info");
-                const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
-                const rawEngineData = await res.json();
+        // ==========================================
+        // 2. DUAL-CHANNEL LOGGER
+        // ==========================================
+        const Logger = {
+            _dom: document.getElementById('output'),
+            _stat: document.getElementById('status'),
+            _colors: { info: "#3498db", success: "#2ecc71", error: "#e74c3c", warning: "#f39c12" },
+            
+            log: (msg, type = "info", obj = null) => {
+                const time = new Date().toLocaleTimeString([], { hour12: false });
+                Logger._dom.innerHTML = `<span style="color: #777;">[${time}]</span> <span style="color: ${Logger._colors[type]};">${msg}</span><br>` + Logger._dom.innerHTML;
                 
-                const unitsData = rawEngineData.data?.units || rawEngineData.units || {};
-                const buildingsData = rawEngineData.data?.buildings || rawEngineData.buildings || {};
+                // DevTools Mirror
+                if (type === "error") console.error(`[AgeVis] ${msg}`, obj || "");
+                else if (type === "warning") console.warn(`[AgeVis] ${msg}`, obj || "");
+                else console.log(`[AgeVis] ${msg}`, obj || "");
+            },
+            status: (msg, colorHex) => {
+                Logger._stat.innerText = msg;
+                Logger._stat.style.color = colorHex;
+            }
+        };
 
-                Object.values(unitsData).forEach(u => AOE_DAT[u.ID || u.id] = { ...u, render_shape: 'circle', size: 2 });
-                Object.values(buildingsData).forEach(b => AOE_DAT[b.ID || b.id] = { ...b, render_shape: 'square', size: 5 });
+        // ==========================================
+        // 3. ENGINE INITIALIZATION
+        // ==========================================
+        const Core = {
+            boot: async () => {
+                try {
+                    Logger.log("Booting PixiJS v8 WebGL engine...", "info");
+                    await AgeVisState.pixi.app.init({ width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE, backgroundColor: 0x111111 });
+                    document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
+                    AgeVisState.pixi.app.stage.addChild(AgeVisState.pixi.container);
 
-                logSystem("Initializing Python WebAssembly...", "info");
-                pyodideInstance = await loadPyodide();
-                
-                logSystem("Bypassing PyPI wheels for dependency tree...", "warning");
-                
-                // --- UNIVERSAL TARBALL INJECTOR ---
-                // Fetches raw source code from PyPI JSON API and injects into WASM RAM
-                await pyodideInstance.runPythonAsync(`
-import json
+                    Logger.log("Fetching Genie Engine Data (3MB)...", "info");
+                    const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
+                    const rawEngineData = await res.json();
+                    
+                    const uData = rawEngineData.data?.units || rawEngineData.units || {};
+                    const bData = rawEngineData.data?.buildings || rawEngineData.buildings || {};
+                    Object.values(uData).forEach(u => AgeVisState.aoeData[u.ID || u.id] = { ...u, render_shape: 'circle', size: 2 });
+                    Object.values(bData).forEach(b => AgeVisState.aoeData[b.ID || b.id] = { ...b, render_shape: 'square', size: 5 });
+
+                    Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
+                    AgeVisState.pyodide = await loadPyodide();
+                    await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
+                    
+                    Logger.status("System Ready. Drop .aoe2record", "#2ecc71");
+                    document.getElementById('dropzone').style.borderColor = "#2ecc71";
+                    Logger.log("System initialized.", "success");
+                    UI.bindDropzone();
+                } catch (error) {
+                    Logger.status("Engine Boot Failed.", "#e74c3c");
+                    Logger.log(`Initialization Error: ${error.message}`, "error", error);
+                }
+            }
+        };
+
+        // ==========================================
+        // 4. PYTHON INTEROP & PARSER
+        // ==========================================
+        const Parser = {
+            PY_DEPENDENCY_INJECTOR: `
+import json, tarfile, io, sys, sysconfig
 from pyodide.http import pyfetch
-import tarfile
-import io
-import sys
-import sysconfig
-
 async def install_tarball(pkg_name, version=""):
-    # 1. Query PyPI for the specific package
     api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
     res = await pyfetch(api_url)
     data = await res.json()
-    
-    # 2. Locate the source .tar.gz file
     tar_url = next(u["url"] for u in data["urls"] if u["url"].endswith(".tar.gz"))
     tar_res = await pyfetch(tar_url)
-    tar_bytes = await tar_res.bytes()
-    
-    # 3. Extract into virtual site-packages
-    tar = tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz")
+    tar = tarfile.open(fileobj=io.BytesIO(await tar_res.bytes()), mode="r:gz")
     site_pkgs = sysconfig.get_paths()["purelib"]
     tar.extractall(site_pkgs)
-    
-    # 4. Bind to sys.path so Python can import it natively
-    folder_name = f"{data['info']['name']}-{data['info']['version']}"
-    sys.path.append(f"{site_pkgs}/{folder_name}")
+    sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
-# Sequentially install the exact parser stack from source
 await install_tarball("construct", "2.10.67")
 await install_tarball("aocx")
 await install_tarball("aoc-mgz")
-                `);
-                
-                document.getElementById('status').innerText = "System Ready. Drop .aoe2record";
-                document.getElementById('status').style.color = "#2ecc71";
-                logSystem("System initialized and ready.", "success");
-                stat.innerText = "System Ready. Drop .aoe2record";
-                stat.style.color = "#2ecc71";
-                document.getElementById('dropzone').style.borderColor = "#2ecc71";
-                logSystem("System initialized and ready.", "success");
-            } catch (error) {
-                stat.innerText = "Engine Boot Failed.";
-                stat.style.color = "#e74c3c";
-                logSystem(`Initialization Error: ${error.message}`, "error");
-            }
-        }
-        initEnvironment();
-
-        // --- 4. DROPZONE & PYTHON PARSER ---
-        const dropzone = document.getElementById('dropzone');
-        dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
-        dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
-        dropzone.ondrop = async (e) => {
-            e.preventDefault(); 
-            dropzone.classList.remove('drag-over');
+            `,
             
-            if (!pyodideInstance) { logSystem("Engine is not ready yet.", "warning"); return; }
-
-            const file = e.dataTransfer.files[0];
-            if (!file) return;
-            if (!file.name.toLowerCase().endsWith('.aoe2record')) {
-                logSystem(`Invalid file: ${file.name}`, "error"); return;
-            }
-
-            logSystem(`Loading ${file.name}...`, "info");
-            document.getElementById('status').innerText = "Parsing binary... Please wait.";
-            document.getElementById('status').style.color = "#f39c12";
-
-            try {
-                const arrayBuffer = await file.arrayBuffer();
-                pyodideInstance.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
-
-                const pyCode = `
+            PY_EXTRACTOR: `
 import json
 from mgz.summary import Summary
-
 try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
@@ -204,12 +180,10 @@ try:
                 commands.append({"t": cmd['timestamp'], "type": "resign", "p": cmd['player_id']})
 
         map_data = summary.get_map()
-        optimized_tiles = [[t['terrain_type'], t['elevation']] for t in map_data['tiles']]
-
         payload = {
             "duration": summary.get_duration(),
             "map_size": map_data['size'],
-            "tiles": optimized_tiles,
+            "tiles": [[t['terrain_type'], t['elevation']] for t in map_data['tiles']],
             "players": [{"name": p['name'], "civ": p['civilization'], "color": p['color_id']} for p in summary.get_players()],
             "objects": init_objs,
             "commands": commands
@@ -218,278 +192,308 @@ try:
 except Exception as e:
     result = json.dumps({"status": "error", "message": str(e)})
 result
-                `;
+            `,
 
-                const parsed = JSON.parse(pyodideInstance.runPython(pyCode));
-                
-                if (parsed.status === "success") {
-                    ageVisData = parsed.data;
-                    logSystem("Binary parsed. Compiling kinematics and terrain...", "info");
+            processFile: async (file) => {
+                Logger.log(`Loading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`, "info");
+                Logger.status("Parsing binary... Please wait.", "#f39c12");
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    AgeVisState.pyodide.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
                     
-                    compileEntityPaths();
-                    calculateCombatDeaths();
-                    generateProceduralMap();
-                    initAgeVisUI();
+                    const parsed = JSON.parse(AgeVisState.pyodide.runPython(Parser.PY_EXTRACTOR));
+                    if (parsed.status === "error") throw new Error(parsed.message);
+
+                    AgeVisState.rawPayload = parsed.data;
+                    Logger.log("Binary parsed successfully. Executing simulation...", "success", parsed.data);
                     
-                    logSystem(`Engine Ready. Tracking ${Object.keys(entityPaths).length} entities.`, "success");
-                    document.getElementById('status').innerText = "Ready. Drop another to swap.";
-                    document.getElementById('status').style.color = "#2ecc71";
-                } else {
-                    throw new Error(parsed.message); 
+                    Simulation.compilePaths();
+                    Simulation.cullCombatDeaths();
+                    Render.buildTerrainCache();
+                    UI.initPlayback();
+                    
+                    Logger.status("Ready.", "#2ecc71");
+                    Logger.log(`Engine Ready. Tracking ${Object.keys(AgeVisState.paths).length} entities.`, "success");
+                } catch (err) {
+                    Logger.log(`Parser Error: ${err.message}`, "error", err);
+                    Logger.status("Parsing Failed", "#e74c3c");
                 }
-            } catch (err) {
-                logSystem(`Parser Error: ${err.message}`, "error");
-                document.getElementById('status').innerText = "Parsing Failed";
-                document.getElementById('status').style.color = "#e74c3c";
             }
         };
 
-        // --- 5. ENGINE MATH HELPERS ---
-        function getPositionAtTime(path, targetTimeMs) {
-            if (!path || path.length === 0) return null;
-            let pos = { x: path[0].x, y: path[0].y, p: path[0].p };
-            for (let i = 0; i < path.length - 1; i++) {
-                if (targetTimeMs >= path[i].t && targetTimeMs <= path[i+1].t) {
-                    const dt = path[i+1].t - path[i].t;
-                    const prog = dt === 0 ? 1 : (targetTimeMs - path[i].t) / dt;
-                    pos.x = path[i].x + (path[i+1].x - path[i].x) * prog;
-                    pos.y = path[i].y + (path[i+1].y - path[i].y) * prog;
-                    return { pos, isMoving: true, lastT: path[i].t };
-                } else if (targetTimeMs > path[i+1].t) {
-                    pos.x = path[i+1].x; pos.y = path[i+1].y;
+        // ==========================================
+        // 5. MATH & SIMULATION ENGINE
+        // ==========================================
+        const MathUtils = {
+            getPosAtTime: (path, t) => {
+                if (!path || path.length === 0) return null;
+                let pos = { x: path[0].x, y: path[0].y, p: path[0].p };
+                for (let i = 0; i < path.length - 1; i++) {
+                    if (t >= path[i].t && t <= path[i+1].t) {
+                        const dt = path[i+1].t - path[i].t;
+                        const prog = dt === 0 ? 1 : (t - path[i].t) / dt;
+                        pos.x = path[i].x + (path[i+1].x - path[i].x) * prog;
+                        pos.y = path[i].y + (path[i+1].y - path[i].y) * prog;
+                        return { pos, isMoving: true, lastT: path[i].t };
+                    } else if (t > path[i+1].t) {
+                        pos.x = path[i+1].x; pos.y = path[i+1].y;
+                    }
                 }
+                return { pos, isMoving: false, lastT: path[path.length - 1].t };
             }
-            return { pos, isMoving: false, lastT: path[path.length - 1].t };
-        }
+        };
 
-        // --- 6. COMPILERS & CULLING ---
-        function compileEntityPaths() {
-            Object.values(entityPaths).forEach(ep => { if (ep.gfx) ep.gfx.destroy(); });
-            entityPaths = {};
-            mapScale = CANVAS_SIZE / ageVisData.map_size;
+        const Simulation = {
+            compilePaths: () => {
+                // Garbage Collection
+                Object.values(AgeVisState.paths).forEach(ep => { if (ep.gfx) ep.gfx.destroy(); });
+                AgeVisState.paths = {};
+                AgeVisState.mapScale = Config.CANVAS_SIZE / AgeVisState.rawPayload.map_size;
 
-            ageVisData.objects.forEach(obj => {
-                if (obj.x === undefined || obj.y === undefined) return;
-                const stats = AOE_DAT[obj.type_id] || FALLBACK_STAT;
-                
-                const g = new PIXI.Graphics();
-                mapContainer.addChild(g);
-                
-                entityPaths[obj.id] = {
-                    path: [{ t: 0, x: obj.x, y: obj.y, p: obj.p, speed: stats.Speed || stats.speed || 1.1, shape: stats.render_shape, size: stats.size }],
-                    gfx: g,         
-                    drawn: false    
-                };
-            });
+                const fallbackStat = { render_shape: "circle", speed: 1.1, size: 2 };
 
-            const sortedCmds = ageVisData.commands.sort((a, b) => a.t - b.t);
-            sortedCmds.forEach(cmd => {
-                if (cmd.type === 'resign') {
-                    Object.values(entityPaths).forEach(ep => { if (ep.path.length > 0 && ep.path[0].p === cmd.p) ep.path.deathTime = Math.min(ep.path.deathTime || Infinity, cmd.t); });
-                    return;
-                }
-                if (cmd.type === 'delete') {
-                    cmd.ids.forEach(id => { if (entityPaths[id]) entityPaths[id].path.deathTime = cmd.t; });
-                    return;
-                }
-
-                cmd.ids.forEach(unitId => {
-                    if (!entityPaths[unitId]) return;
-                    const path = entityPaths[unitId].path;
-                    let lastNode = path[path.length - 1];
-
-                    if (lastNode.t > cmd.t) {
-                        const prevNode = path[path.length - 2] || path[0];
-                        const dt = lastNode.t - prevNode.t;
-                        const prog = dt === 0 ? 1 : (cmd.t - prevNode.t) / dt;
-                        lastNode.t = cmd.t;
-                        lastNode.x = prevNode.x + (lastNode.x - prevNode.x) * prog;
-                        lastNode.y = prevNode.y + (lastNode.y - prevNode.y) * prog;
-                    } else if (lastNode.t < cmd.t) {
-                        path.push({ t: cmd.t, x: lastNode.x, y: lastNode.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
-                        lastNode = path[path.length - 1];
-                    }
-
-                    const dist = Math.sqrt(Math.pow(cmd.x - lastNode.x, 2) + Math.pow(cmd.y - lastNode.y, 2));
-                    const travelMs = (dist / (lastNode.speed > 0 ? lastNode.speed : 1.1)) * 1000;
-                    path.push({ t: cmd.t + travelMs, x: cmd.x, y: cmd.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
+                AgeVisState.rawPayload.objects.forEach(obj => {
+                    if (obj.x === undefined || obj.y === undefined) return;
+                    const stats = AgeVisState.aoeData[obj.type_id] || fallbackStat;
+                    
+                    const g = new PIXI.Graphics();
+                    AgeVisState.pixi.container.addChild(g);
+                    
+                    AgeVisState.paths[obj.id] = {
+                        path: [{ t: 0, x: obj.x, y: obj.y, p: obj.p, speed: stats.Speed || stats.speed || 1.1, shape: stats.render_shape, size: stats.size }],
+                        gfx: g,
+                        drawn: false
+                    };
                 });
-            });
-        }
 
-        function calculateCombatDeaths() {
-            const ids = Object.keys(entityPaths);
-            ids.forEach(id => {
-                const path = entityPaths[id].path;
-                if (path.length === 0 || path.deathTime) return;
-                const lastNode = path[path.length - 1];
-                if (lastNode.t > ageVisData.duration - 15000) return;
-
-                for (let i = 0; i < ids.length; i++) {
-                    const ePath = entityPaths[ids[i]].path; 
-                    if (ids[i] === id || ePath[0].p === lastNode.p || ePath[0].p === null) continue;
-                    if (ePath.deathTime && ePath.deathTime < lastNode.t) continue;
-                    
-                    const eState = getPositionAtTime(ePath, lastNode.t);
-                    if (!eState) continue;
-                    
-                    if (Math.sqrt(Math.pow(lastNode.x - eState.pos.x, 2) + Math.pow(lastNode.y - eState.pos.y, 2)) <= 8) {
-                        path.deathTime = lastNode.t + 3000; 
-                        break;
+                const sortedCmds = AgeVisState.rawPayload.commands.sort((a, b) => a.t - b.t);
+                sortedCmds.forEach(cmd => {
+                    if (cmd.type === 'resign') {
+                        Object.values(AgeVisState.paths).forEach(ep => { if (ep.path.length > 0 && ep.path[0].p === cmd.p) ep.path.deathTime = Math.min(ep.path.deathTime || Infinity, cmd.t); });
+                        return;
                     }
-                }
-            });
-        }
+                    if (cmd.type === 'delete') {
+                        cmd.ids.forEach(id => { if (AgeVisState.paths[id]) AgeVisState.paths[id].path.deathTime = cmd.t; });
+                        return;
+                    }
 
-        // --- 7. TERRAIN GENERATOR ---
-        function generateProceduralMap() {
-            if (staticBackground) { app.stage.removeChild(staticBackground); staticBackground.destroy(true); }
-            
-            const offscreen = document.createElement('canvas');
-            offscreen.width = CANVAS_SIZE; offscreen.height = CANVAS_SIZE;
-            const ctx = offscreen.getContext('2d');
-            
-            const size = ageVisData.map_size;
-            const tileSize = CANVAS_SIZE / size;
+                    cmd.ids.forEach(unitId => {
+                        if (!AgeVisState.paths[unitId]) return;
+                        const path = AgeVisState.paths[unitId].path;
+                        let lastNode = path[path.length - 1];
 
-            const terrainColors = {
-                0: '#3b823b', 1: '#2A3B9A', 2: '#1E592F', 9: '#3d7031', 
-                10: '#112E0E', 12: '#82643a', 13: '#6e522b', 14: '#ab8854', 
-                19: '#183815', 22: '#1A2B15', 24: '#999999', default: '#4a5e3d'
-            };
+                        if (lastNode.t > cmd.t) {
+                            const prevNode = path[path.length - 2] || path[0];
+                            const dt = lastNode.t - prevNode.t;
+                            const prog = dt === 0 ? 1 : (cmd.t - prevNode.t) / dt;
+                            lastNode.t = cmd.t;
+                            lastNode.x = prevNode.x + (lastNode.x - prevNode.x) * prog;
+                            lastNode.y = prevNode.y + (lastNode.y - prevNode.y) * prog;
+                        } else if (lastNode.t < cmd.t) {
+                            path.push({ t: cmd.t, x: lastNode.x, y: lastNode.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
+                            lastNode = path[path.length - 1];
+                        }
 
-            let tileIndex = 0;
-            for (let x = 0; x < size; x++) {
-                for (let y = 0; y < size; y++) {
-                    const tile = ageVisData.tiles[tileIndex];
-                    const cX = x * tileSize, cY = CANVAS_SIZE - ((y + 1) * tileSize);
+                        const dist = Math.sqrt(Math.pow(cmd.x - lastNode.x, 2) + Math.pow(cmd.y - lastNode.y, 2));
+                        const travelMs = (dist / (lastNode.speed > 0 ? lastNode.speed : 1.1)) * 1000;
+                        path.push({ t: cmd.t + travelMs, x: cmd.x, y: cmd.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
+                    });
+                });
+            },
 
-                    ctx.fillStyle = terrainColors[tile[0]] || terrainColors.default;
-                    ctx.fillRect(cX, cY, tileSize, tileSize);
+            cullCombatDeaths: () => {
+                const ids = Object.keys(AgeVisState.paths);
+                ids.forEach(id => {
+                    const path = AgeVisState.paths[id].path;
+                    if (path.length === 0 || path.deathTime) return;
+                    const lastNode = path[path.length - 1];
+                    if (lastNode.t > AgeVisState.rawPayload.duration - 15000) return;
 
-                    if (tile[1] > 0) {
-                        ctx.fillStyle = `rgba(255, 255, 255, ${tile[1] * 0.12})`;
+                    for (let i = 0; i < ids.length; i++) {
+                        const ePath = AgeVisState.paths[ids[i]].path; 
+                        if (ids[i] === id || ePath[0].p === lastNode.p || ePath[0].p === null) continue;
+                        if (ePath.deathTime && ePath.deathTime < lastNode.t) continue;
+                        
+                        const eState = MathUtils.getPosAtTime(ePath, lastNode.t);
+                        if (!eState) continue;
+                        
+                        if (Math.sqrt(Math.pow(lastNode.x - eState.pos.x, 2) + Math.pow(lastNode.y - eState.pos.y, 2)) <= 8) {
+                            path.deathTime = lastNode.t + 3000; break;
+                        }
+                    }
+                });
+            }
+        };
+
+        // ==========================================
+        // 6. PIXIJS RENDERER
+        // ==========================================
+        const Render = {
+            buildTerrainCache: () => {
+                if (AgeVisState.pixi.bg) { AgeVisState.pixi.app.stage.removeChild(AgeVisState.pixi.bg); AgeVisState.pixi.bg.destroy(true); }
+                
+                const offscreen = document.createElement('canvas');
+                offscreen.width = Config.CANVAS_SIZE; offscreen.height = Config.CANVAS_SIZE;
+                const ctx = offscreen.getContext('2d');
+                
+                const size = AgeVisState.rawPayload.map_size;
+                const tileSize = Config.CANVAS_SIZE / size;
+
+                let tileIndex = 0;
+                for (let x = 0; x < size; x++) {
+                    for (let y = 0; y < size; y++) {
+                        const tile = AgeVisState.rawPayload.tiles[tileIndex];
+                        const cX = x * tileSize, cY = Config.CANVAS_SIZE - ((y + 1) * tileSize);
+
+                        ctx.fillStyle = Config.TERRAIN_COLORS[tile[0]] || Config.TERRAIN_COLORS.default;
                         ctx.fillRect(cX, cY, tileSize, tileSize);
+                        if (tile[1] > 0) {
+                            ctx.fillStyle = `rgba(255, 255, 255, ${tile[1] * 0.12})`;
+                            ctx.fillRect(cX, cY, tileSize, tileSize);
+                        }
+                        tileIndex++;
                     }
-                    tileIndex++;
                 }
-            }
+                const texture = PIXI.Texture.from(offscreen);
+                AgeVisState.pixi.bg = new PIXI.Sprite(texture);
+                AgeVisState.pixi.app.stage.addChildAt(AgeVisState.pixi.bg, 0); 
+            },
 
-            const texture = PIXI.Texture.from(offscreen);
-            staticBackground = new PIXI.Sprite(texture);
-            app.stage.addChildAt(staticBackground, 0); 
-        }
+            drawFrame: (timeMs) => {
+                if (!AgeVisState.rawPayload) return;
+                let stats = { 1: { pA: 0, pT: 0, bA: 0, bT: 0 }, 2: { pA: 0, pT: 0, bA: 0, bT: 0 } };
 
-        // --- 8. UI & PLAYBACK ---
-        function initAgeVisUI() {
-            const tl = document.getElementById('timeline');
-            tl.max = ageVisData.duration; tl.disabled = false; tl.value = 0;
-            
-            if (ageVisData.players.length >= 2) {
-                [0, 1].forEach(i => {
-                    const p = ageVisData.players[i], cardNum = i+1;
-                    document.getElementById(`p${cardNum}-card`).style.display = 'block';
-                    document.getElementById(`p${cardNum}-card`).style.borderLeftColor = '#' + (aoeColors[p.color] || 0xFFFFFF).toString(16).padStart(6, '0');
-                    document.getElementById(`p${cardNum}-name`).innerText = p.name;
-                    document.getElementById(`p${cardNum}-civ`).innerText = `(${p.civ})`;
+                Object.keys(AgeVisState.paths).forEach(id => {
+                    const ep = AgeVisState.paths[id];
+                    const path = ep.path;
+                    const base = path[0];
+                    const g = ep.gfx;
+                    
+                    const isDead = path.deathTime && timeMs >= path.deathTime;
+                    
+                    if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
+                        const isBld = base.shape === 'square' || base.shape === 'building';
+                        if (isBld) { stats[base.p].bT++; if (!isDead) stats[base.p].bA++; } 
+                        else { stats[base.p].pT++; if (!isDead) stats[base.p].pA++; }
+                    }
+
+                    if (isDead || timeMs < base.t) { g.visible = false; return; }
+                    g.visible = true;
+
+                    // O(1) Geometry Compilation
+                    if (!ep.drawn) {
+                        const rSize = Math.max(base.size * (AgeVisState.mapScale / 4), 2);
+                        if (base.shape === 'square' || base.shape === 'building') g.rect(-rSize, -rSize, rSize * 2, rSize * 2);
+                        else g.circle(0, 0, rSize);
+                        g.fill(Config.COLORS[base.p] || 0x666666);
+                        ep.drawn = true;
+                    }
+
+                    const state = MathUtils.getPosAtTime(path, timeMs);
+                    let alpha = 1.0;
+                    if (!state.isMoving && timeMs > state.lastT) {
+                        const idle = timeMs - state.lastT;
+                        if (idle > 60000) alpha = Math.max(0.3, 1.0 - ((idle - 60000) / 60000));
+                    }
+
+                    g.alpha = alpha;
+                    g.x = state.pos.x * AgeVisState.mapScale;
+                    g.y = Config.CANVAS_SIZE - (state.pos.y * AgeVisState.mapScale);
                 });
+
+                UI.updateTelemetry(timeMs, stats);
             }
+        };
 
-            tl.addEventListener('input', (e) => { currentPlayTime = parseInt(e.target.value); renderMapState(currentPlayTime); });
-            
-            const btnPlay = document.getElementById('btn-play');
-            const newBtnPlay = btnPlay.cloneNode(true);
-            btnPlay.parentNode.replaceChild(newBtnPlay, btnPlay);
-            
-            newBtnPlay.addEventListener('click', () => {
-                isPlaying = !isPlaying; newBtnPlay.innerText = isPlaying ? "⏸ Pause" : "▶ Play";
-                if (isPlaying) { lastFrameTime = performance.now(); requestAnimationFrame(playbackLoop); }
-            });
+        // ==========================================
+        // 7. UI & EVENT CONTROLLERS
+        // ==========================================
+        const UI = {
+            bindDropzone: () => {
+                const dz = document.getElementById('dropzone');
+                dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('drag-over'); };
+                dz.ondragleave = () => dz.classList.remove('drag-over');
+                dz.ondrop = async (e) => { e.preventDefault(); dz.classList.remove('drag-over'); Parser.processFile(e.dataTransfer.files[0]); };
+            },
 
-            const btnSpeed = document.getElementById('btn-speed');
-            const newBtnSpeed = btnSpeed.cloneNode(true);
-            btnSpeed.parentNode.replaceChild(newBtnSpeed, btnSpeed);
-
-            newBtnSpeed.addEventListener('click', () => {
-                playbackSpeed = speedCycle[(speedCycle.indexOf(playbackSpeed) + 1) % speedCycle.length];
-                newBtnSpeed.innerText = playbackSpeed + 'x';
-                newBtnSpeed.style.color = playbackSpeed === 8 ? '#f39c12' : 'white';
-            });
-
-            renderMapState(0);
-        }
-
-        function playbackLoop(ts) {
-            if (!isPlaying) return;
-            currentPlayTime += (ts - lastFrameTime) * playbackSpeed;
-            lastFrameTime = ts;
-            
-            if (currentPlayTime > ageVisData.duration) { 
-                currentPlayTime = ageVisData.duration; 
-                isPlaying = false; 
-                document.getElementById('btn-play').innerText = "▶ Play"; 
-            }
-            
-            document.getElementById('timeline').value = currentPlayTime;
-            renderMapState(currentPlayTime);
-            
-            if (isPlaying) requestAnimationFrame(playbackLoop);
-        }
-
-        // --- 9. RENDERER & TELEMETRY ---
-        function renderMapState(timeMs) {
-            if (!ageVisData) return;
-            document.getElementById('time-display').innerText = new Date(timeMs).toISOString().substr(11, 8);
-            let stats = { 1: { pA: 0, pT: 0, bA: 0, bT: 0 }, 2: { pA: 0, pT: 0, bA: 0, bT: 0 } };
-
-            Object.keys(entityPaths).forEach(id => {
-                const ep = entityPaths[id];
-                const path = ep.path;
-                const base = path[0];
-                const g = ep.gfx;
+            initPlayback: () => {
+                const tl = document.getElementById('timeline');
+                tl.max = AgeVisState.rawPayload.duration; tl.disabled = false; tl.value = 0;
                 
-                const isDead = path.deathTime && timeMs >= path.deathTime;
-                
-                if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
-                    const isBld = base.shape === 'square' || base.shape === 'building';
-                    if (isBld) { stats[base.p].bT++; if (!isDead) stats[base.p].bA++; } 
-                    else { stats[base.p].pT++; if (!isDead) stats[base.p].pA++; }
+                if (AgeVisState.rawPayload.players.length >= 2) {
+                    [0, 1].forEach(i => {
+                        const p = AgeVisState.rawPayload.players[i], cardNum = i+1;
+                        document.getElementById(`p${cardNum}-card`).style.display = 'block';
+                        document.getElementById(`p${cardNum}-card`).style.borderLeftColor = '#' + (Config.COLORS[p.color] || 0xFFFFFF).toString(16).padStart(6, '0');
+                        document.getElementById(`p${cardNum}-name`).innerText = p.name;
+                        document.getElementById(`p${cardNum}-civ`).innerText = `(${p.civ})`;
+                    });
                 }
 
-                if (isDead || timeMs < base.t) { g.visible = false; return; }
-                g.visible = true;
+                // Clean clone to wipe old listeners
+                const btnPlay = document.getElementById('btn-play');
+                const newBtnPlay = btnPlay.cloneNode(true);
+                btnPlay.parentNode.replaceChild(newBtnPlay, btnPlay);
+                newBtnPlay.addEventListener('click', UI.togglePlay);
 
-                if (!ep.drawn) {
-                    const rSize = Math.max(base.size * (mapScale / 4), 2);
-                    if (base.shape === 'square' || base.shape === 'building') {
-                        g.rect(-rSize, -rSize, rSize * 2, rSize * 2);
-                    } else {
-                        g.circle(0, 0, rSize);
-                    }
-                    g.fill(aoeColors[base.p] || 0x666666);
-                    ep.drawn = true;
+                const btnSpeed = document.getElementById('btn-speed');
+                const newBtnSpeed = btnSpeed.cloneNode(true);
+                btnSpeed.parentNode.replaceChild(newBtnSpeed, btnSpeed);
+                newBtnSpeed.addEventListener('click', UI.toggleSpeed);
+
+                tl.addEventListener('input', (e) => { 
+                    AgeVisState.playback.currentTime = parseInt(e.target.value); 
+                    Render.drawFrame(AgeVisState.playback.currentTime); 
+                });
+
+                Render.drawFrame(0);
+            },
+
+            togglePlay: () => {
+                AgeVisState.playback.isPlaying = !AgeVisState.playback.isPlaying; 
+                document.getElementById('btn-play').innerText = AgeVisState.playback.isPlaying ? "⏸ Pause" : "▶ Play";
+                if (AgeVisState.playback.isPlaying) { 
+                    AgeVisState.playback.lastFrameTime = performance.now(); 
+                    requestAnimationFrame(UI.tick); 
                 }
+            },
 
-                const state = getPositionAtTime(path, timeMs);
-                let alpha = 1.0;
+            toggleSpeed: () => {
+                const s = AgeVisState.playback.speed;
+                AgeVisState.playback.speed = Config.SPEED_CYCLE[(Config.SPEED_CYCLE.indexOf(s) + 1) % Config.SPEED_CYCLE.length];
+                const btn = document.getElementById('btn-speed');
+                btn.innerText = AgeVisState.playback.speed + 'x';
+                btn.style.color = AgeVisState.playback.speed >= 8 ? '#f39c12' : 'white';
+            },
+
+            tick: (ts) => {
+                if (!AgeVisState.playback.isPlaying) return;
+                AgeVisState.playback.currentTime += (ts - AgeVisState.playback.lastFrameTime) * AgeVisState.playback.speed;
+                AgeVisState.playback.lastFrameTime = ts;
                 
-                if (!state.isMoving && timeMs > state.lastT) {
-                    const idle = timeMs - state.lastT;
-                    if (idle > 60000) alpha = Math.max(0.3, 1.0 - ((idle - 60000) / 60000));
+                if (AgeVisState.playback.currentTime > AgeVisState.rawPayload.duration) { 
+                    AgeVisState.playback.currentTime = AgeVisState.rawPayload.duration; 
+                    UI.togglePlay(); 
                 }
+                
+                document.getElementById('timeline').value = AgeVisState.playback.currentTime;
+                Render.drawFrame(AgeVisState.playback.currentTime);
+                if (AgeVisState.playback.isPlaying) requestAnimationFrame(UI.tick);
+            },
 
-                g.alpha = alpha;
-                g.x = state.pos.x * mapScale;
-                g.y = CANVAS_SIZE - (state.pos.y * mapScale);
-            });
-
-            if (document.getElementById('p1-card').style.display === 'block') {
-                document.getElementById('p1-pop').innerText = `${stats[1].pA} / ${stats[1].pT}`;
-                document.getElementById('p1-bld').innerText = `${stats[1].bA} / ${stats[1].bT}`;
-                document.getElementById('p2-pop').innerText = `${stats[2].pA} / ${stats[2].pT}`;
-                document.getElementById('p2-bld').innerText = `${stats[2].bA} / ${stats[2].bT}`;
+            updateTelemetry: (timeMs, stats) => {
+                document.getElementById('time-display').innerText = new Date(timeMs).toISOString().substr(11, 8);
+                if (document.getElementById('p1-card').style.display === 'block') {
+                    document.getElementById('p1-pop').innerText = `${stats[1].pA} / ${stats[1].pT}`;
+                    document.getElementById('p1-bld').innerText = `${stats[1].bA} / ${stats[1].bT}`;
+                    document.getElementById('p2-pop').innerText = `${stats[2].pA} / ${stats[2].pT}`;
+                    document.getElementById('p2-bld').innerText = `${stats[2].bA} / ${stats[2].bT}`;
+                }
             }
-        }
+        };
+
+        // Bootstrap
+        Core.boot();
     </script>
 </body>
 </html>
