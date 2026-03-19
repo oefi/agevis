@@ -104,7 +104,7 @@
             apm: {},
             mapScale: 1,
             playback: { isPlaying: false, currentTime: 0, lastFrameTime: 0, speed: 1 },
-            pixi: { app: new PIXI.Application(), container: new PIXI.Container(), bg: null }
+            pixi: { app: null, container: null, bg: null }
         };
 
         // ==========================================
@@ -142,6 +142,8 @@
             boot: async () => {
                 try {
                     Logger.log("Booting PixiJS v8 WebGL engine...", "info");
+                    AgeVisState.pixi.app = new PIXI.Application();
+                    AgeVisState.pixi.container = new PIXI.Container();
                     await AgeVisState.pixi.app.init({ width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE, backgroundColor: 0x111111 });
                     document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
                     AgeVisState.pixi.app.stage.addChild(AgeVisState.pixi.container);
@@ -198,7 +200,7 @@ async def install_tarball(pkg_name, version=""):
     tar_res = await pyfetch(tar_url)
     tar = tarfile.open(fileobj=io.BytesIO(await tar_res.bytes()), mode="r:gz")
     site_pkgs = sysconfig.get_paths()["purelib"]
-    tar.extractall(site_pkgs)
+    tar.extractall(site_pkgs, filter='data')
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
 await install_tarball("construct", "2.10.67")
