@@ -128,7 +128,7 @@
         // ==========================================
         const Core = {
             boot: async () => {
-                try {
+try {
                     Logger.log("Booting PixiJS v8 WebGL engine...", "info");
                     await AgeVisState.pixi.app.init({ width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE, backgroundColor: 0x111111 });
                     document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
@@ -145,10 +145,7 @@
 
                     Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
                     AgeVisState.pyodide = await loadPyodide();
-                    
-                    // Explicitly load unvendored Pyodide standard libraries
-                    await AgeVisState.pyodide.loadPackage(["micropip", "hashlib"]); 
-                    
+                    await AgeVisState.pyodide.loadPackage("micropip"); 
                     await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
                     
                     Logger.status("System Ready. Drop or Select File", "#2ecc71");
@@ -158,6 +155,7 @@
                     
                     Logger.log("System initialized.", "success");
                     UI.bindDropzone();
+                
                 } catch (error) {
                     Logger.status("Engine Boot Failed.", "#e74c3c");
                     Logger.log(`Initialization Error: ${error.message}`, "error", error);
@@ -168,12 +166,16 @@
         // ==========================================
         // 4. PYTHON INTEROP & PARSER
         // ==========================================
-        const Parser = {
+const Parser = {
             PY_DEPENDENCY_INJECTOR: `
 import json, tarfile, io, sys, sysconfig, types
 from pyodide.http import pyfetch
 import pyodide.ffi
 import js
+import micropip
+
+# Force installation of unvendored standard libraries
+await micropip.install(["hashlib"])
 
 async def install_tarball(pkg_name, version=""):
     api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
@@ -187,6 +189,16 @@ async def install_tarball(pkg_name, version=""):
     site_pkgs = sysconfig.get_paths()["purelib"]
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
+
+# --- NEW: GITHUB TARBALL INJECTOR ---
+async def install_github_tarball(repo, branch="master"):
+    url = f"https://github.com/{repo}/archive/refs/heads/{branch}.tar.gz"
+    res = await pyfetch(url)
+    tar = tarfile.open(fileobj=io.BytesIO(await res.bytes()), mode="r:gz")
+    site_pkgs = sysconfig.get_paths()["purelib"]
+    root_dir = tar.getnames()[0].split('/')[0]
+    tar.extractall(site_pkgs)
+    sys.path.append(f"{site_pkgs}/{root_dir}")
 
 # --- ZSTD DECOMPRESSION BRIDGE ---
 class JSDecompressor:
@@ -203,7 +215,9 @@ sys.modules["zstandard"] = zstd
 await install_tarball("construct", "2.8.16")
 await install_tarball("aocref")
 await install_tarball("tabulate")
-await install_tarball("mgz")
+
+# CRITICAL FIX: Fetch updated community parser for modern DE Replays directly from GitHub
+await install_github_tarball("AoEInsights/aoc-mgz", "master")
             `,
             
             PY_EXTRACTOR: `
