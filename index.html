@@ -55,7 +55,14 @@
     const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
 
     let pyodideInstance;
-    let ageVisData = null; // Global store for the parsed replay
+    let ageVisData = null; 
+    let entityPaths = {}; // Stores pre-calculated lifecycles: { entityId: [{t, x, y}, ...] }
+    
+    // Playback State
+    let isPlaying = false;
+    let currentPlayTime = 0;
+    let lastFrameTime = 0;
+    const playbackSpeed = 5; // 5x speed multiplier
 
     // 2. Boot Pyodide
     async function initPython() {
@@ -64,7 +71,7 @@
         await pyodideInstance.pyimport("micropip").install("aoc-mgz");
         
         const stat = document.getElementById('status');
-        stat.innerText = "AgeVis Ready. Drop .aoe2record";
+        stat.innerText = "AgeVis Engine Ready. Drop .aoe2record";
         stat.style.color = "#2ecc71";
         document.getElementById('dropzone').style.borderColor = "#2ecc71";
     }
@@ -79,12 +86,11 @@
         dropzone.classList.remove('drag-over');
         if (!pyodideInstance) return;
         
-        document.getElementById('output').innerText = "AgeVis: Parsing binary command stream...";
+        document.getElementById('output').innerText = "AgeVis: Compiling binary paths...";
         const file = e.dataTransfer.files[0];
         const arrayBuffer = await file.arrayBuffer();
         pyodideInstance.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
 
-        // AgeVis Expanded Parser (Includes Commands)
         const pyCode = `
 import json
 from mgz.summary import Summary
@@ -93,17 +99,14 @@ try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
         
-        # 1. Initial State
-        init_objs = [{"p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "id": o.get("instance_id")} for o in summary.get_objects()]
+        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y")} for o in summary.get_objects() if o.get("instance_id") is not None]
         
-        # 2. Command Stream (Move/Build Waypoints)
         commands = []
         for cmd in summary.get_commands():
-            if cmd['type'] in ['move', 'build'] and 'position' in cmd:
+            if cmd['type'] in ['move', 'build'] and 'position' in cmd and 'object_ids' in cmd:
                 commands.append({
-                    "t": cmd['timestamp'], # Milliseconds
-                    "p": cmd['player_id'],
-                    "type": cmd['type'],
+                    "t": cmd['timestamp'],
+                    "ids": cmd['object_ids'],
                     "x": cmd['position'][0],
                     "y": cmd['position'][1]
                 })
@@ -122,85 +125,138 @@ result
         `;
 
         const parsedData = JSON.parse(pyodideInstance.runPython(pyCode));
-        
         if (parsedData.status === "success") {
             ageVisData = parsedData.data;
-            document.getElementById('output').innerText = \`AgeVis Parse Complete.
-Initial Entities: \${ageVisData.objects.length}
-Command Waypoints: \${ageVisData.commands.length}\`;
+            compileEntityPaths();
             initAgeVisUI();
+            document.getElementById('output').innerText = "Path Compilation Complete.\nEntities Tracked: " + Object.keys(entityPaths).length;
         } else {
             document.getElementById('output').innerText = "Error: " + parsedData.message;
         }
     };
 
-    // 4. AgeVis Scrubber Engine
+    // 4. Pre-Compile Entity Paths (O(1) Render Prep)
+    function compileEntityPaths() {
+        entityPaths = {};
+        
+        // A. Register initial positions (Time = 0)
+        ageVisData.objects.forEach(obj => {
+            if (obj.x === undefined || obj.y === undefined) return;
+            entityPaths[obj.id] = [{ t: 0, x: obj.x, y: obj.y, p: obj.p }];
+        });
+
+        // B. Append movement commands chronologically
+        // Note: AoE2 movement speed requires complex math. 
+        // For this prototype, we assume units reach their destination exactly when the next command is issued, or 10s later.
+        ageVisData.commands.forEach(cmd => {
+            cmd.ids.forEach(unitId => {
+                if (!entityPaths[unitId]) return;
+                
+                const lastNode = entityPaths[unitId][entityPaths[unitId].length - 1];
+                const player = lastNode.p;
+                
+                // Add the destination node (assuming arrival roughly 10 seconds later for visualization)
+                entityPaths[unitId].push({ t: cmd.t + 10000, x: cmd.x, y: cmd.y, p: player });
+            });
+        });
+    }
+
+    // 5. AgeVis Scrubber & Playback UI
     function initAgeVisUI() {
-        const data = ageVisData;
         const timeline = document.getElementById('timeline');
-        timeline.max = data.duration;
+        timeline.max = ageVisData.duration;
         timeline.disabled = false;
         timeline.value = 0;
 
-        // Bind Scrub Event
         timeline.addEventListener('input', (e) => {
-            renderMapState(parseInt(e.target.value));
-            document.getElementById('time-display').innerText = new Date(parseInt(e.target.value)).toISOString().substr(14, 5);
+            currentPlayTime = parseInt(e.target.value);
+            renderMapState(currentPlayTime);
+            updateTimeDisplay(currentPlayTime);
         });
 
-        // Initial Render at T=0
+        const playBtn = document.getElementById('btn-play');
+        playBtn.addEventListener('click', () => {
+            isPlaying = !isPlaying;
+            playBtn.innerText = isPlaying ? "⏸ Pause" : "▶ Play";
+            if (isPlaying) {
+                lastFrameTime = performance.now();
+                requestAnimationFrame(playbackLoop);
+            }
+        });
+
         renderMapState(0);
     }
 
-    // 5. Time-Series Renderer
+    function updateTimeDisplay(ms) {
+        document.getElementById('time-display').innerText = new Date(ms).toISOString().substr(11, 8);
+    }
+
+    // 6. Playback Animation Loop
+    function playbackLoop(timestamp) {
+        if (!isPlaying) return;
+        
+        const deltaMs = timestamp - lastFrameTime;
+        lastFrameTime = timestamp;
+        
+        currentPlayTime += (deltaMs * playbackSpeed);
+        
+        if (currentPlayTime > ageVisData.duration) {
+            currentPlayTime = ageVisData.duration;
+            isPlaying = false;
+            document.getElementById('btn-play').innerText = "▶ Play";
+        }
+
+        document.getElementById('timeline').value = currentPlayTime;
+        updateTimeDisplay(currentPlayTime);
+        renderMapState(currentPlayTime);
+
+        if (isPlaying) requestAnimationFrame(playbackLoop);
+    }
+
+    // 7. Time-Series Lerp Renderer
     function renderMapState(targetTimeMs) {
         if (!ageVisData) return;
-        
         mapContainer.removeChildren();
         const scale = CANVAS_SIZE / ageVisData.map_size; 
         
-        // Base Terrain
         const bg = new PIXI.Graphics();
         bg.beginFill(0x334433).drawRect(0, 0, CANVAS_SIZE, CANVAS_SIZE).endFill();
         mapContainer.addChild(bg);
 
-        // State Tracker for this specific millisecond
-        // We clone initial objects to determine their starting positions
-        let activeState = JSON.parse(JSON.stringify(ageVisData.objects)); 
-        
-        // Fast-Forward Engine: Apply all movement commands up to targetTimeMs
-        // (Note: In a production app, we would cache keyframes to avoid O(N) loops on every drag)
-        for (let i = 0; i < ageVisData.commands.length; i++) {
-            const cmd = ageVisData.commands[i];
-            if (cmd.t > targetTimeMs) break; 
-            
-            // For this prototype, we treat a 'move' command to X/Y as a generic player blip
-            // Real routing requires binding cmd.object_ids to specific activeState entities
-            if(cmd.type === 'move' || cmd.type === 'build') {
-                activeState.push({ p: cmd.p, x: cmd.x, y: cmd.y, is_command: true });
-            }
-        }
+        // Iterate all tracked entities and interpolate their current position
+        Object.keys(entityPaths).forEach(id => {
+            const path = entityPaths[id];
+            if (path.length === 0) return;
 
-        // Draw the calculated state
-        activeState.forEach(obj => {
-            if(obj.x === undefined || obj.y === undefined) return;
-            
-            const dot = new PIXI.Graphics();
-            const color = aoeColors[obj.p] || 0x666666; 
-            
-            const canvasX = obj.x * scale;
-            const canvasY = CANVAS_SIZE - (obj.y * scale);
-            
-            // Differentiate raw commands (clicks) from static initial units
-            if (obj.is_command) {
-                dot.beginFill(color, 0.5).drawCircle(canvasX, canvasY, 4).endFill(); // Ghost click
-            } else {
-                dot.beginFill(color).drawCircle(canvasX, canvasY, obj.p ? 3 : 1).endFill(); // Solid unit
+            let currentPos = { x: path[0].x, y: path[0].y, p: path[0].p };
+
+            // Find bracketing nodes for Lerp
+            for (let i = 0; i < path.length - 1; i++) {
+                const nodeA = path[i];
+                const nodeB = path[i+1];
+
+                if (targetTimeMs >= nodeA.t && targetTimeMs <= nodeB.t) {
+                    // Object is currently moving between nodeA and nodeB
+                    const progress = (targetTimeMs - nodeA.t) / (nodeB.t - nodeA.t);
+                    currentPos.x = nodeA.x + (nodeB.x - nodeA.x) * progress;
+                    currentPos.y = nodeA.y + (nodeB.y - nodeA.y) * progress;
+                    break;
+                } else if (targetTimeMs > nodeB.t) {
+                    // Object has passed this waypoint, snap to it
+                    currentPos.x = nodeB.x;
+                    currentPos.y = nodeB.y;
+                }
             }
+
+            // Draw Entity
+            const dot = new PIXI.Graphics();
+            const color = aoeColors[currentPos.p] || 0x666666; 
+            const canvasX = currentPos.x * scale;
+            const canvasY = CANVAS_SIZE - (currentPos.y * scale);
             
+            dot.beginFill(color).drawCircle(canvasX, canvasY, currentPos.p ? 3 : 1).endFill();
             mapContainer.addChild(dot);
         });
     }
-    </script>
 </body>
 </html>
