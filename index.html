@@ -190,10 +190,15 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
-# --- NEW: GITHUB TARBALL INJECTOR ---
+# --- NEW: GITHUB TARBALL INJECTOR (CORS BYPASS) ---
 async def install_github_tarball(repo, branch="master"):
-    url = f"https://github.com/{repo}/archive/refs/heads/{branch}.tar.gz"
-    res = await pyfetch(url)
+    # GitHub blocks direct browser downloads. We bounce through a public CORS proxy.
+    import urllib.parse
+    target_url = f"https://github.com/{repo}/archive/refs/heads/{branch}.tar.gz"
+    encoded_url = urllib.parse.quote(target_url, safe='')
+    proxy_url = f"https://corsproxy.io/?{encoded_url}"
+    
+    res = await pyfetch(proxy_url)
     tar = tarfile.open(fileobj=io.BytesIO(await res.bytes()), mode="r:gz")
     site_pkgs = sysconfig.get_paths()["purelib"]
     root_dir = tar.getnames()[0].split('/')[0]
