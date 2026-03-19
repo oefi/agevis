@@ -44,49 +44,48 @@
     </div>
 
     <script>
-        // 1. Initialize Canvas Environment
-        const CANVAS_SIZE = 650;
-        const app = new PIXI.Application({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x2a2a2a });
-        document.getElementById('canvas-container').appendChild(app.view);
+// 1. Initialize Canvas Environment
+    const CANVAS_SIZE = 650;
+    const app = new PIXI.Application({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x2a2a2a });
+    document.getElementById('canvas-container').appendChild(app.view);
+    
+    const mapContainer = new PIXI.Container();
+    app.stage.addChild(mapContainer);
+
+    const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
+
+    let pyodideInstance;
+    let ageVisData = null; // Global store for the parsed replay
+
+    // 2. Boot Pyodide
+    async function initPython() {
+        pyodideInstance = await loadPyodide();
+        await pyodideInstance.loadPackage("micropip");
+        await pyodideInstance.pyimport("micropip").install("aoc-mgz");
         
-        const mapContainer = new PIXI.Container();
-        app.stage.addChild(mapContainer);
+        const stat = document.getElementById('status');
+        stat.innerText = "AgeVis Ready. Drop .aoe2record";
+        stat.style.color = "#2ecc71";
+        document.getElementById('dropzone').style.borderColor = "#2ecc71";
+    }
+    initPython();
 
-        // Player Colors (AoE2 IDs map to Hex)
-        const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
+    // 3. Drop & Parse Engine
+    const dropzone = document.getElementById('dropzone');
+    dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
+    dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
+    dropzone.ondrop = async (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('drag-over');
+        if (!pyodideInstance) return;
+        
+        document.getElementById('output').innerText = "AgeVis: Parsing binary command stream...";
+        const file = e.dataTransfer.files[0];
+        const arrayBuffer = await file.arrayBuffer();
+        pyodideInstance.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
 
-        let pyodideInstance;
-        let matchDurationMs = 0;
-
-        // 2. Boot Pyodide
-        async function initPython() {
-            pyodideInstance = await loadPyodide();
-            await pyodideInstance.loadPackage("micropip");
-            await pyodideInstance.pyimport("micropip").install("aoc-mgz");
-            
-            const stat = document.getElementById('status');
-            stat.innerText = "Ready. Drop .aoe2record";
-            stat.style.color = "#2ecc71";
-            document.getElementById('dropzone').style.borderColor = "#2ecc71";
-        }
-        initPython();
-
-        // 3. Drop & Parse Engine
-        const dropzone = document.getElementById('dropzone');
-        dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
-        dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
-        dropzone.ondrop = async (e) => {
-            e.preventDefault();
-            dropzone.classList.remove('drag-over');
-            if (!pyodideInstance) return;
-            
-            document.getElementById('output').innerText = "Parsing binary structure...";
-            const file = e.dataTransfer.files[0];
-            const arrayBuffer = await file.arrayBuffer();
-            pyodideInstance.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
-
-            // Python Extraction Payload (Expanded)
-            const pyCode = `
+        // AgeVis Expanded Parser (Includes Commands)
+        const pyCode = `
 import json
 from mgz.summary import Summary
 
@@ -94,86 +93,114 @@ try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
         
-        # Extract initial state objects (TCs, Villagers, Trees)
-        init_objs = []
-        for obj in summary.get_objects():
-            # Filter out some noise, keep basic entities
-            init_objs.append({
-                "p": obj.get("player_number"),
-                "x": obj.get("x"),
-                "y": obj.get("y")
-            })
+        # 1. Initial State
+        init_objs = [{"p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "id": o.get("instance_id")} for o in summary.get_objects()]
+        
+        # 2. Command Stream (Move/Build Waypoints)
+        commands = []
+        for cmd in summary.get_commands():
+            if cmd['type'] in ['move', 'build'] and 'position' in cmd:
+                commands.append({
+                    "t": cmd['timestamp'], # Milliseconds
+                    "p": cmd['player_id'],
+                    "type": cmd['type'],
+                    "x": cmd['position'][0],
+                    "y": cmd['position'][1]
+                })
 
         payload = {
             "duration": summary.get_duration(),
             "map_size": summary.get_map()['size'],
             "players": [{"name": p['name'], "civ": p['civilization'], "color": p['color_id']} for p in summary.get_players()],
-            "objects": init_objs
+            "objects": init_objs,
+            "commands": commands
         }
     result = json.dumps({"status": "success", "data": payload})
 except Exception as e:
     result = json.dumps({"status": "error", "message": str(e)})
 result
-            `;
+        `;
 
-            const parsedData = JSON.parse(pyodideInstance.runPython(pyCode));
-            
-            if (parsedData.status === "success") {
-                document.getElementById('output').innerText = "Parse Complete.\nObjects loaded: " + parsedData.data.objects.length;
-                initMatchUI(parsedData.data);
-            } else {
-                document.getElementById('output').innerText = "Error: " + parsedData.message;
-            }
-        };
-
-        // 4. Render Logic & State Management
-        function initMatchUI(data) {
-            // Update Sidebar
-            const p1 = data.players[0] || {name: "P1", civ: "Unknown"};
-            const p2 = data.players[1] || {name: "P2", civ: "Unknown"};
-            document.getElementById('match-info').innerHTML = `
-                <strong>${p1.name}</strong> (${p1.civ})<br>
-                <div style="text-align:center; margin: 5px 0;">VS</div>
-                <strong>${p2.name}</strong> (${p2.civ})<br>
-                <hr style="border: 1px solid #444; margin: 10px 0;">
-                Map Size: ${data.map_size}x${data.map_size}
-            `;
-
-            // Configure Scrubber
-            matchDurationMs = data.duration;
-            const timeline = document.getElementById('timeline');
-            timeline.max = matchDurationMs;
-            timeline.disabled = false;
-
-            // Draw Initial Map State
-            mapContainer.removeChildren(); // Clear previous
-            
-            // Calculate scale: Canvas pixels per AoE2 tile
-            const scale = CANVAS_SIZE / data.map_size; 
-
-            // Draw map background bounds
-            const bg = new PIXI.Graphics();
-            bg.beginFill(0x334433).drawRect(0, 0, CANVAS_SIZE, CANVAS_SIZE).endFill();
-            mapContainer.addChild(bg);
-
-            // Draw all initial objects (Gaia & Players)
-            data.objects.forEach(obj => {
-                if(obj.x === undefined || obj.y === undefined) return;
-                
-                const dot = new PIXI.Graphics();
-                const color = aoeColors[obj.p] || 0x666666; // Default to grey for Gaia/Trees
-                
-                // Map AoE coordinates to Canvas coordinates
-                const canvasX = obj.x * scale;
-                const canvasY = CANVAS_SIZE - (obj.y * scale); // Invert Y axis for canvas drawing
-                
-                // Make player objects slightly larger than Gaia objects
-                const size = obj.p ? 3 : 1; 
-                
-                dot.beginFill(color).drawCircle(canvasX, canvasY, size).endFill();
-                mapContainer.addChild(dot);
-            });
+        const parsedData = JSON.parse(pyodideInstance.runPython(pyCode));
+        
+        if (parsedData.status === "success") {
+            ageVisData = parsedData.data;
+            document.getElementById('output').innerText = \`AgeVis Parse Complete.
+Initial Entities: \${ageVisData.objects.length}
+Command Waypoints: \${ageVisData.commands.length}\`;
+            initAgeVisUI();
+        } else {
+            document.getElementById('output').innerText = "Error: " + parsedData.message;
         }
+    };
+
+    // 4. AgeVis Scrubber Engine
+    function initAgeVisUI() {
+        const data = ageVisData;
+        const timeline = document.getElementById('timeline');
+        timeline.max = data.duration;
+        timeline.disabled = false;
+        timeline.value = 0;
+
+        // Bind Scrub Event
+        timeline.addEventListener('input', (e) => {
+            renderMapState(parseInt(e.target.value));
+            document.getElementById('time-display').innerText = new Date(parseInt(e.target.value)).toISOString().substr(14, 5);
+        });
+
+        // Initial Render at T=0
+        renderMapState(0);
+    }
+
+    // 5. Time-Series Renderer
+    function renderMapState(targetTimeMs) {
+        if (!ageVisData) return;
+        
+        mapContainer.removeChildren();
+        const scale = CANVAS_SIZE / ageVisData.map_size; 
+        
+        // Base Terrain
+        const bg = new PIXI.Graphics();
+        bg.beginFill(0x334433).drawRect(0, 0, CANVAS_SIZE, CANVAS_SIZE).endFill();
+        mapContainer.addChild(bg);
+
+        // State Tracker for this specific millisecond
+        // We clone initial objects to determine their starting positions
+        let activeState = JSON.parse(JSON.stringify(ageVisData.objects)); 
+        
+        // Fast-Forward Engine: Apply all movement commands up to targetTimeMs
+        // (Note: In a production app, we would cache keyframes to avoid O(N) loops on every drag)
+        for (let i = 0; i < ageVisData.commands.length; i++) {
+            const cmd = ageVisData.commands[i];
+            if (cmd.t > targetTimeMs) break; 
+            
+            // For this prototype, we treat a 'move' command to X/Y as a generic player blip
+            // Real routing requires binding cmd.object_ids to specific activeState entities
+            if(cmd.type === 'move' || cmd.type === 'build') {
+                activeState.push({ p: cmd.p, x: cmd.x, y: cmd.y, is_command: true });
+            }
+        }
+
+        // Draw the calculated state
+        activeState.forEach(obj => {
+            if(obj.x === undefined || obj.y === undefined) return;
+            
+            const dot = new PIXI.Graphics();
+            const color = aoeColors[obj.p] || 0x666666; 
+            
+            const canvasX = obj.x * scale;
+            const canvasY = CANVAS_SIZE - (obj.y * scale);
+            
+            // Differentiate raw commands (clicks) from static initial units
+            if (obj.is_command) {
+                dot.beginFill(color, 0.5).drawCircle(canvasX, canvasY, 4).endFill(); // Ghost click
+            } else {
+                dot.beginFill(color).drawCircle(canvasX, canvasY, obj.p ? 3 : 1).endFill(); // Solid unit
+            }
+            
+            mapContainer.addChild(dot);
+        });
+    }
     </script>
 </body>
 </html>
