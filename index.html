@@ -15,7 +15,7 @@
         #timeline { flex-grow: 1; cursor: pointer; }
         .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12 !important; }
         .stats-box { background: #1a1a1a; padding: 10px; border-radius: 4px; font-size: 14px; margin-bottom: 15px; }
-        .log { color: #aaa; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; flex-grow: 1; margin-top: auto; border-top: 2px solid #444; margin-bottom: 0; padding-top: 10px; }
+        .log { color: #aaa; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; flex-grow: 1; margin-top: 0; padding-top: 5px; border-top: none; margin-bottom: 0; }
         button { background: #f39c12; color: #111; border: none; padding: 6px 12px; font-weight: bold; cursor: pointer; border-radius: 3px; }
         button:hover { background: #e67e22; }
         #btn-speed { background: #444; color: white; width: 45px; }
@@ -48,6 +48,11 @@
                 <div>Pop (Alive/Total):</div> <div id="p2-pop" style="text-align: right; color: #2ecc71;">0 / 0</div>
                 <div>Buildings:</div> <div id="p2-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
             </div>
+        </div>
+        
+        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: auto; padding-top: 15px; border-top: 2px solid #444;">
+            <strong style="color: #aaa; font-size: 12px;">System Console</strong>
+            <button id="btn-copy" style="background: #444; color: white; border: none; padding: 4px 8px; font-size: 11px; cursor: pointer; border-radius: 3px; transition: 0.2s;">📋 Copy</button>
         </div>
         <div class="log" id="output"></div>
     </div>
@@ -84,7 +89,7 @@
         };
 
         // ==========================================
-        // 2. DUAL-CHANNEL LOGGER
+        // 2. DUAL-CHANNEL LOGGER & UTILS
         // ==========================================
         const Logger = {
             _dom: document.getElementById('output'),
@@ -103,6 +108,19 @@
                 Logger._stat.style.color = colorHex;
             }
         };
+
+        document.getElementById('btn-copy').addEventListener('click', () => {
+            const logText = document.getElementById('output').innerText;
+            navigator.clipboard.writeText(logText).then(() => {
+                const btn = document.getElementById('btn-copy');
+                btn.innerText = "✅ Copied!";
+                btn.style.background = "#2ecc71";
+                setTimeout(() => {
+                    btn.innerText = "📋 Copy";
+                    btn.style.background = "#444";
+                }, 2000);
+            });
+        });
 
         // ==========================================
         // 3. ENGINE INITIALIZATION
@@ -126,10 +144,7 @@
 
                     Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
                     AgeVisState.pyodide = await loadPyodide();
-                    
-                    // CRITICAL FIX: Explicitly load micropip before executing python script
                     await AgeVisState.pyodide.loadPackage("micropip"); 
-                    
                     await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
                     
                     Logger.status("System Ready. Drop or Select File", "#2ecc71");
@@ -151,7 +166,7 @@
         // ==========================================
         const Parser = {
             PY_DEPENDENCY_INJECTOR: `
-import json, tarfile, io, sys, sysconfig
+import json, tarfile, io, sys, sysconfig, types
 from pyodide.http import pyfetch
 import micropip
 
@@ -168,7 +183,11 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
-await micropip.install(["zstandard"])
+# VRAM/Dependency Fix: Inject dummy zstandard to bypass C-extension missing wheel crash
+zstd = types.ModuleType("zstandard")
+zstd.ZstdDecompressor = lambda *args, **kwargs: None
+sys.modules["zstandard"] = zstd
+
 await install_tarball("construct", "2.10.67")
 await install_tarball("mgz")
             `,
@@ -179,8 +198,6 @@ from mgz.summary import Summary
 try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
-        
-        # VRAM FIX: Filter out Gaia
         init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")} for o in summary.get_objects() if o.get("instance_id") is not None and o.get("player_number") in [1, 2, 3, 4, 5, 6, 7, 8]]
         
         commands = []
@@ -290,7 +307,6 @@ result
                     }
 
                     cmd.ids.forEach(unitId => {
-                        // Dynamic Entity Discovery
                         if (!AgeVisState.paths[unitId]) {
                             const g = new PIXI.Graphics();
                             AgeVisState.pixi.container.addChild(g);
@@ -529,7 +545,6 @@ result
             }
         };
 
-        // Bootstrap
         Core.boot();
     </script>
 </body>
