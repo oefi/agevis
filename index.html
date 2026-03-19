@@ -2,699 +2,823 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AgeVis - AoE2 Replay Visualizer</title>
+    <title>AgeVis — AoE2 Replay Visualizer</title>
     <link rel="icon" href="data:;base64,iVBORw0KGgo=">
     <script src="https://pixijs.download/v8.9.2/pixi.js"></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
     <style>
-        body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
-        #sidebar { width: 350px; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; display: flex; flex-direction: column; z-index: 10; }
-        #main-view { flex-grow: 1; display: flex; flex-direction: column; background: #111; position: relative; }
-        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-        #playback-bar { height: 60px; background: #222; border-top: 2px solid #444; display: flex; align-items: center; padding: 0 20px; gap: 15px; z-index: 10; }
-        #timeline-wrapper { flex-grow: 1; position: relative; display: flex; align-items: center; }
-        #timeline { width: 100%; cursor: pointer; position: relative; z-index: 2; }
-        #age-markers { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; z-index: 1; }
-        .age-marker { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 3px; border-radius: 1px; pointer-events: auto; cursor: help; }
-        .age-marker-label { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); font-size: 9px; white-space: nowrap; margin-top: 2px; font-family: monospace; font-weight: bold; }
-        #tooltip { display: none; position: fixed; background: #1a1a1a; border: 1px solid #555; border-radius: 4px; padding: 6px 10px; font-size: 13px; font-family: sans-serif; pointer-events: none; z-index: 1000; max-width: 220px; line-height: 1.6; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-        .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12 !important; }
-        .stats-box { background: #1a1a1a; padding: 10px; border-radius: 4px; font-size: 14px; margin-bottom: 15px; }
-        .log { color: #aaa; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; flex-grow: 1; margin-top: auto; border-top: 2px solid #444; margin-bottom: 0; padding-top: 10px; }
-        .log-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; border-top: 2px solid #444; margin-top: auto; flex-shrink: 0; }
-        .log-toolbar span { color: #777; font-size: 11px; flex-grow: 1; font-family: monospace; }
-        .log-btn { background: #333; color: #aaa; border: 1px solid #555; padding: 2px 8px; font-size: 11px; font-weight: normal; border-radius: 3px; cursor: pointer; }
-        .log-btn:hover { background: #444; color: white; }
+        *, *::before, *::after { box-sizing: border-box; }
+        body { margin: 0; background: #1e1e1e; color: #ddd; font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
+
+        /* ── Sidebar ── */
+        #sidebar { width: 340px; min-width: 340px; background: #2a2a2a; padding: 16px; border-right: 2px solid #3a3a3a; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+        #sidebar h2 { margin: 0 0 4px; color: #f39c12; font-size: 17px; border-bottom: 1px solid #3a3a3a; padding-bottom: 10px; }
         .badge-1v1 { display: inline-block; background: #2a1a00; color: #f39c12; border: 1px solid #f39c12; border-radius: 3px; font-size: 10px; font-weight: bold; padding: 1px 5px; vertical-align: middle; margin-left: 6px; letter-spacing: 0.5px; }
-        button { background: #f39c12; color: #111; border: none; padding: 6px 12px; font-weight: bold; cursor: pointer; border-radius: 3px; }
+
+        /* ── Dropzone ── */
+        #dropzone { padding: 14px 12px; border: 2px dashed #555; text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s; border-radius: 6px; background: #222; }
+        #dropzone.drag-over { background: #3d3d3d; border-color: #f39c12; }
+        #status { color: #f39c12; font-weight: bold; display: block; margin-bottom: 4px; font-size: 14px; }
+        #dropzone small { color: #555; font-size: 11px; }
+
+        /* ── Player cards ── */
+        .card { background: #1a1a1a; padding: 10px 12px; border-radius: 4px; border-left: 4px solid #555; display: none; }
+        .card-header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+        .card-name { font-size: 15px; font-weight: bold; }
+        .card-civ { color: #777; font-size: 11px; }
+        .card-stats { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: 12px; color: #aaa; }
+        .card-stats .val { text-align: right; font-family: monospace; }
+        .val-pop { color: #2ecc71; }
+        .val-bld { color: #f39c12; }
+        .val-apm { color: #3498db; }
+
+        /* ── Log ── */
+        .log-toolbar { display: flex; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid #3a3a3a; flex-shrink: 0; }
+        .log-toolbar span { color: #666; font-size: 11px; font-family: monospace; flex-grow: 1; }
+        .log-btn { background: #333; color: #888; border: 1px solid #484848; padding: 2px 8px; font-size: 11px; font-weight: normal; border-radius: 3px; cursor: pointer; }
+        .log-btn:hover { background: #444; color: #ccc; }
+        #log { color: #888; font-family: monospace; font-size: 11.5px; white-space: pre-wrap; word-break: break-all; overflow-y: auto; flex-grow: 1; padding-top: 6px; }
+
+        /* ── Main view ── */
+        #main-view { flex-grow: 1; display: flex; flex-direction: column; background: #111; }
+        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+        /* ── Playback bar ── */
+        #playback-bar { height: 56px; background: #1e1e1e; border-top: 2px solid #3a3a3a; display: flex; align-items: center; padding: 0 16px; gap: 12px; flex-shrink: 0; }
+        #timeline-wrapper { flex-grow: 1; position: relative; display: flex; align-items: center; height: 100%; }
+        #timeline { width: 100%; cursor: pointer; accent-color: #f39c12; }
+        #age-markers { position: absolute; inset: 0; pointer-events: none; }
+        .age-marker { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 3px; border-radius: 2px; cursor: help; pointer-events: auto; }
+        .age-marker-lbl { position: absolute; top: calc(100% + 2px); left: 50%; transform: translateX(-50%); font-size: 9px; font-family: monospace; font-weight: bold; white-space: nowrap; }
+        #time-display { font-family: monospace; font-size: 13px; width: 62px; color: #2ecc71; flex-shrink: 0; }
+
+        /* ── Buttons ── */
+        button { background: #f39c12; color: #111; border: none; padding: 5px 11px; font-weight: bold; cursor: pointer; border-radius: 3px; font-size: 13px; }
         button:hover { background: #e67e22; }
-        #btn-speed { background: #444; color: white; width: 45px; }
+        #btn-speed { background: #383838; color: #ccc; width: 40px; }
+        #btn-browse { background: #2980b9; color: #fff; }
+
+        /* ── Tooltip ── */
+        #tooltip { display: none; position: fixed; background: #181818; border: 1px solid #484848; border-radius: 4px; padding: 6px 10px; font-size: 12px; pointer-events: none; z-index: 9999; max-width: 200px; line-height: 1.7; box-shadow: 0 3px 10px rgba(0,0,0,0.6); }
+        .tt-name { font-weight: bold; color: #ddd; }
+        .tt-owner { color: #666; font-size: 11px; }
+        .tt-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; border: 1px solid rgba(255,255,255,0.2); }
     </style>
 </head>
 <body>
 
-    <div id="sidebar">
-        <h2 style="margin-top:0; color: #f39c12; border-bottom: 2px solid #444; padding-bottom: 10px;">AgeVis Engine <span class="badge-1v1">1v1</span></h2>
-        
-        <div id="dropzone" style="padding: 20px 15px; border: 2px dashed #666; text-align: center; margin-bottom: 15px; cursor: pointer; transition: 0.2s; border-radius: 6px; background: #222;">
-            <span id="status" style="color: #f39c12; font-weight: bold; display: block; margin-bottom: 8px; font-size: 15px;">Initializing Engine...</span>
-            <span style="color: #666; font-size: 11px; display: block; margin-bottom: 12px;">1v1 replays only &mdash; .aoe2record</span>
-            <input type="file" id="file-input" accept=".aoe2record" style="display: none;">
-            <button id="btn-browse" style="display: none; margin: 0 auto; background: #3498db; color: white;">📂 Browse File</button>
-        </div>
-        
-        <div class="stats-box" id="p1-card" style="border-left: 4px solid #0000FF; display: none;">
-            <strong id="p1-name" style="font-size: 16px;">P1</strong> <span id="p1-civ" style="color: #aaa; font-size: 12px;"></span>
-            <hr style="border: 1px solid #333; margin: 8px 0;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px;">
-                <div>Pop (Alive/Total):</div> <div id="p1-pop" style="text-align: right; color: #2ecc71;">0 / 0</div>
-                <div>Buildings:</div> <div id="p1-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
-                <div>APM:</div> <div id="p1-apm" style="text-align: right; color: #3498db;">—</div>
-            </div>
-        </div>
+<div id="sidebar">
+    <h2>AgeVis Engine <span class="badge-1v1">1v1</span></h2>
 
-        <div class="stats-box" id="p2-card" style="border-left: 4px solid #FF0000; display: none;">
-            <strong id="p2-name" style="font-size: 16px;">P2</strong> <span id="p2-civ" style="color: #aaa; font-size: 12px;"></span>
-            <hr style="border: 1px solid #333; margin: 8px 0;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px;">
-                <div>Pop (Alive/Total):</div> <div id="p2-pop" style="text-align: right; color: #2ecc71;">0 / 0</div>
-                <div>Buildings:</div> <div id="p2-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
-                <div>APM:</div> <div id="p2-apm" style="text-align: right; color: #3498db;">—</div>
-            </div>
-        </div>
-        <div class="log-toolbar">
-            <span id="log-count">0 events</span>
-            <button class="log-btn" onclick="navigator.clipboard.writeText(document.getElementById('output').innerText).then(()=>this.innerText='Copied!',setTimeout(()=>this.innerText='Copy',1500))">Copy</button>
-            <button class="log-btn" onclick="document.getElementById('output').innerHTML='';document.getElementById('log-count').innerText='0 events';Logger._count=0;">Clear</button>
-        </div>
-        <div class="log" id="output"></div>
+    <div id="dropzone">
+        <span id="status">Initializing Engine…</span>
+        <small>1v1 replays only — .aoe2record</small><br>
+        <input type="file" id="file-input" accept=".aoe2record" style="display:none">
+        <button id="btn-browse" style="display:none; margin-top:10px;">📂 Browse File</button>
     </div>
 
-    <div id="main-view">
-        <div id="canvas-container"></div>
-        <div id="playback-bar">
-            <button id="btn-play">▶ Play</button>
-            <button id="btn-speed">1x</button>
-            <span id="time-display" style="font-family: monospace; font-size: 14px; width: 65px; color: #2ecc71;">00:00:00</span>
-            <div id="timeline-wrapper">
-                <input type="range" id="timeline" min="0" max="100" value="0" disabled>
-                <div id="age-markers"></div>
-            </div>
+    <div class="card" id="p1-card">
+        <div class="card-header">
+            <span class="card-name" id="p1-name">P1</span>
+            <span class="card-civ"  id="p1-civ"></span>
+        </div>
+        <div class="card-stats">
+            <span>Pop (alive/total)</span> <span class="val val-pop" id="p1-pop">—</span>
+            <span>Buildings</span>         <span class="val val-bld" id="p1-bld">—</span>
+            <span>APM (60s)</span>         <span class="val val-apm" id="p1-apm">—</span>
         </div>
     </div>
 
-    <div id="tooltip"></div>
+    <div class="card" id="p2-card">
+        <div class="card-header">
+            <span class="card-name" id="p2-name">P2</span>
+            <span class="card-civ"  id="p2-civ"></span>
+        </div>
+        <div class="card-stats">
+            <span>Pop (alive/total)</span> <span class="val val-pop" id="p2-pop">—</span>
+            <span>Buildings</span>         <span class="val val-bld" id="p2-bld">—</span>
+            <span>APM (60s)</span>         <span class="val val-apm" id="p2-apm">—</span>
+        </div>
+    </div>
 
-    <script>
-        // ==========================================
-        // 1. CONFIGURATION & GLOBAL STATE
-        // ==========================================
-        const Config = {
-            CANVAS_SIZE: 750,
-            COLORS: { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF },
-            TERRAIN_COLORS: { 0: '#3b823b', 1: '#2A3B9A', 2: '#1E592F', 9: '#3d7031', 10: '#112E0E', 12: '#82643a', 13: '#6e522b', 14: '#ab8854', 19: '#183815', 22: '#1A2B15', 24: '#999999', default: '#4a5e3d' },
-            SPEED_CYCLE: [1, 2, 4, 8, 16]
-        };
+    <div class="log-toolbar">
+        <span id="log-count">0 events</span>
+        <button class="log-btn" id="btn-copy">Copy</button>
+        <button class="log-btn" onclick="Logger.clear()">Clear</button>
+    </div>
+    <div id="log"></div>
+</div>
 
-        window.AgeVisState = {
-            pyodide: null,
-            aoeData: {}, 
-            rawPayload: null,
-            paths: {},
-            apm: {},
-            mapScale: 1,
-            playback: { isPlaying: false, currentTime: 0, lastFrameTime: 0, speed: 1 },
-            pixi: { app: null, container: null, bg: null }
-        };
+<div id="main-view">
+    <div id="canvas-container"></div>
+    <div id="playback-bar">
+        <button id="btn-play">▶ Play</button>
+        <button id="btn-speed">1x</button>
+        <span id="time-display">00:00:00</span>
+        <div id="timeline-wrapper">
+            <input type="range" id="timeline" min="0" max="100" value="0" disabled>
+            <div id="age-markers"></div>
+        </div>
+    </div>
+</div>
 
-        // ==========================================
-        // 2. DUAL-CHANNEL LOGGER
-        // ==========================================
-        const Logger = {
-            _dom: document.getElementById('output'),
-            _stat: document.getElementById('status'),
-            _count: 0,
-            _colors: { info: "#3498db", success: "#2ecc71", error: "#e74c3c", warning: "#f39c12" },
-            
-            log: (msg, type = "info", obj = null) => {
-                const time = new Date().toLocaleTimeString([], { hour12: false });
-                const errDetail = (type === "error" && obj) ? `\n  ↳ ${obj.stack ? obj.stack.split('\n').slice(0,2).join(' | ') : String(obj)}` : '';
-                Logger._dom.innerHTML = `<span style="color: #555;">[${time}]</span> <span style="color: ${Logger._colors[type]};">${msg}</span>${errDetail ? `<span style="color:#664444;font-size:11px;">${errDetail}</span>` : ''}<br>` + Logger._dom.innerHTML;
-                Logger._count++;
-                const errCount = (Logger._dom.innerHTML.match(/color: #e74c3c/g)||[]).length;
-                const warnCount = (Logger._dom.innerHTML.match(/color: #f39c12/g)||[]).length;
-                const cntEl = document.getElementById('log-count');
-                if (cntEl) cntEl.innerText = `${Logger._count} events${errCount ? ` · ${errCount} err` : ''}${warnCount ? ` · ${warnCount} warn` : ''}`;
-                if (type === "error") { console.error(`[AgeVis] ${msg}`, obj || ""); cntEl && (cntEl.style.color = '#e74c3c'); }
-                else if (type === "warning") console.warn(`[AgeVis] ${msg}`, obj || "");
-                else console.log(`[AgeVis] ${msg}`, obj || "");
-            },
-            status: (msg, colorHex) => {
-                Logger._stat.innerText = msg;
-                Logger._stat.style.color = colorHex;
+<div id="tooltip"></div>
+
+<script>
+// ============================================================
+// 1. CONFIG & STATE
+// ============================================================
+const Config = {
+    CANVAS_SIZE: 750,
+    PLAYER_COLORS: {
+        1: 0x0066FF, 2: 0xFF2020, 3: 0x00CC44, 4: 0xDDDD00,
+        5: 0x00CCCC, 6: 0xFF44FF, 7: 0x888888, 8: 0xFF8800,
+    },
+    TERRAIN_COLORS: {
+        0:'#3b823b', 1:'#2A3B9A', 2:'#1E592F', 9:'#3d7031', 10:'#112E0E',
+        12:'#82643a', 13:'#6e522b', 14:'#ab8854', 19:'#183815',
+        22:'#1A2B15', 24:'#999999', _:'#4a5e3d',
+    },
+    GAIA_COLORS:  { gold:'#f0c030', stone:'#aaaaaa', relic:'#ffffaa' },
+    AGE_COLORS:   { Feudal:'#f39c12', Castle:'#e74c3c', Imperial:'#9b59b6' },
+    SPEED_CYCLE:  [1, 2, 4, 8, 16],
+};
+
+window.AgeVisState = {
+    pyodide:    null,
+    aoeData:    {},
+    rawPayload: null,
+    paths:      {},
+    apm:        {},
+    mapScale:   1,
+    playback:   { isPlaying: false, currentTime: 0, lastFrameTime: 0, speed: 1 },
+    pixi:       { app: null, container: null, bg: null },
+};
+
+// ============================================================
+// 2. LOGGER
+//    Counters are tracked as plain ints — no innerHTML regex.
+// ============================================================
+const Logger = (() => {
+    const dom   = document.getElementById('log');
+    const stat  = document.getElementById('status');
+    const cntEl = document.getElementById('log-count');
+    const COLORS = { info:'#3498db', success:'#2ecc71', error:'#e74c3c', warning:'#f39c12' };
+    let total = 0, errs = 0, warns = 0;
+
+    function refreshCount() {
+        const parts = [`${total} events`];
+        if (errs)  parts.push(`${errs} err`);
+        if (warns) parts.push(`${warns} warn`);
+        cntEl.innerText   = parts.join(' · ');
+        cntEl.style.color = errs ? '#e74c3c' : '#666';
+    }
+
+    return {
+        log(msg, type = 'info', obj = null) {
+            const time = new Date().toLocaleTimeString([], { hour12: false });
+            let extra = '';
+            if (type === 'error' && obj) {
+                const trace = obj.stack ? obj.stack.split('\n').slice(0, 3).join('\n    ') : String(obj);
+                extra = `\n    ${trace}`;
             }
-        };
+            dom.innerHTML =
+                `<span style="color:#4a4a4a">[${time}]</span> ` +
+                `<span style="color:${COLORS[type]}">${msg}</span>` +
+                (extra ? `<span style="color:#5a3333;font-size:10.5px">${extra}</span>` : '') +
+                '<br>' + dom.innerHTML;
 
-        // ==========================================
-        // 3. ENGINE INITIALIZATION
-        // ==========================================
-        const Core = {
-            boot: async () => {
-                try {
-                    Logger.log("Booting PixiJS v8 WebGL engine...", "info");
-                    AgeVisState.pixi.app = new PIXI.Application();
-                    AgeVisState.pixi.container = new PIXI.Container();
-                    await AgeVisState.pixi.app.init({ width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE, backgroundColor: 0x111111 });
-                    document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
-                    AgeVisState.pixi.app.stage.addChild(AgeVisState.pixi.container);
-                    AgeVisState.pixi.container.eventMode = 'static';
-                    AgeVisState.pixi.container.interactiveChildren = true;
+            total++;
+            if (type === 'error')   { errs++;  console.error('[AgeVis]', msg, obj ?? ''); }
+            if (type === 'warning') { warns++; console.warn('[AgeVis]', msg, obj ?? ''); }
+            else console.log('[AgeVis]', msg, obj ?? '');
+            refreshCount();
+        },
 
-                    Logger.log("Fetching Genie Engine Data (3MB)...", "info");
-                    const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
-                    const rawEngineData = await res.json();
-                    
-                    const uData = rawEngineData.data?.units || rawEngineData.units || {};
-                    const bData = rawEngineData.data?.buildings || rawEngineData.buildings || {};
-                    Object.values(uData).forEach(u => AgeVisState.aoeData[u.ID || u.id] = { ...u, render_shape: 'circle', size: 2 });
-                    Object.values(bData).forEach(b => AgeVisState.aoeData[b.ID || b.id] = { ...b, render_shape: 'square', size: 5 });
+        status(msg, hex) { stat.innerText = msg; stat.style.color = hex; },
 
-                    Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
-                    AgeVisState.pyodide = await loadPyodide();
-                    
-                    // Load native packages via loadPackage (C extensions — micropip can't handle these)
-                    await AgeVisState.pyodide.loadPackage(["micropip", "zstandard"]);
-                    
-                    await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
-                    
-                    Logger.status("System Ready. Drop or Select File", "#2ecc71");
-                    document.getElementById('dropzone').style.borderColor = "#2ecc71";
-                    document.getElementById('dropzone').style.background = "#1a251a";
-                    document.getElementById('btn-browse').style.display = "block";
-                    
-                    Logger.log("System initialized.", "success");
-                    UI.bindDropzone();
-                } catch (error) {
-                    Logger.status("Engine Boot Failed.", "#e74c3c");
-                    Logger.log(`Initialization Error: ${error.message}`, "error", error);
-                }
-            }
-        };
+        clear() { dom.innerHTML = ''; total = errs = warns = 0; refreshCount(); },
 
-        // ==========================================
-        // 4. PYTHON INTEROP & PARSER
-        // ==========================================
-        const Parser = {
-            PY_DEPENDENCY_INJECTOR: `
+        // FIX: proper .then(onSuccess, onFailure) — setTimeout was previously
+        // passed as the rejection handler, which invoked it immediately.
+        copyToClipboard() {
+            navigator.clipboard.writeText(dom.innerText).then(
+                () => {
+                    const b = document.getElementById('btn-copy');
+                    b.innerText = 'Copied!';
+                    setTimeout(() => { b.innerText = 'Copy'; }, 1500);
+                },
+                () => Logger.log('Clipboard write failed (permissions?)', 'warning')
+            );
+        },
+    };
+})();
+document.getElementById('btn-copy').addEventListener('click', () => Logger.copyToClipboard());
+
+// ============================================================
+// 3. ENGINE BOOT
+// ============================================================
+const Core = {
+    boot: async () => {
+        try {
+            Logger.log('Booting PixiJS v8 WebGL engine…');
+            // FIX: Instantiate here, not at parse time.
+            // Constructing PIXI.Application() at module scope causes two WebGL
+            // probe contexts (isWebGLSupported, maxRecommendedTextures) to be
+            // created and immediately lost before init() even runs.
+            AgeVisState.pixi.app       = new PIXI.Application();
+            AgeVisState.pixi.container = new PIXI.Container();
+            await AgeVisState.pixi.app.init({
+                width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE,
+                backgroundColor: 0x111111,
+            });
+            document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
+            AgeVisState.pixi.app.stage.addChild(AgeVisState.pixi.container);
+            AgeVisState.pixi.container.eventMode          = 'static';
+            AgeVisState.pixi.container.interactiveChildren = true;
+
+            // FIX: Tooltip.init() binds a canvas mousemove listener.
+            // Must be called exactly once, here, not inside initPlayback()
+            // where it would leak a new listener on every replay load.
+            Tooltip.init();
+
+            Logger.log('Fetching Genie Engine unit data…');
+            const res   = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
+            const raw   = await res.json();
+            const uData = raw.data?.units     || raw.units     || {};
+            const bData = raw.data?.buildings || raw.buildings || {};
+            Object.values(uData).forEach(u => { AgeVisState.aoeData[u.ID ?? u.id] = { ...u, render_shape: 'circle', size: 2 }; });
+            Object.values(bData).forEach(b => { AgeVisState.aoeData[b.ID ?? b.id] = { ...b, render_shape: 'square', size: 5 }; });
+            Logger.log(`${Object.keys(AgeVisState.aoeData).length} unit/building definitions loaded.`, 'success');
+
+            Logger.log('Initializing Pyodide WASM runtime…');
+            AgeVisState.pyodide = await loadPyodide();
+            // FIX: zstandard is a C extension — loadPackage() not micropip.install()
+            await AgeVisState.pyodide.loadPackage(['micropip', 'zstandard']);
+            await AgeVisState.pyodide.runPythonAsync(Parser.PY_BOOT);
+
+            Logger.status('Ready — drop or select a replay', '#2ecc71');
+            const dz = document.getElementById('dropzone');
+            dz.style.borderColor = '#2ecc71';
+            dz.style.background  = '#111f11';
+            document.getElementById('btn-browse').style.display = 'inline-block';
+            Logger.log('Engine ready.', 'success');
+            UI.bindDropzone();
+        } catch (err) {
+            Logger.status('Engine boot failed', '#e74c3c');
+            Logger.log(`Boot error: ${err.message}`, 'error', err);
+        }
+    },
+};
+
+// ============================================================
+// 4. PYTHON STRINGS
+// ============================================================
+const Parser = {
+
+    // Bootstraps mgz + construct from PyPI tarballs.
+    // micropip cannot install C extensions or packages without WASM wheels —
+    // we fetch .tar.gz sources directly and inject them into sys.path.
+    PY_BOOT: `
 import json, tarfile, io, sys, sysconfig
 from pyodide.http import pyfetch
-import micropip
 
 async def install_tarball(pkg_name, version=""):
-    api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
-    res = await pyfetch(api_url)
-    data = await res.json()
-    if "urls" not in data:
-        raise ValueError(f"Package {pkg_name} not found. Response: {data}")
-    tar_url = next(u["url"] for u in data["urls"] if u["url"].endswith(".tar.gz"))
-    tar_res = await pyfetch(tar_url)
-    tar = tarfile.open(fileobj=io.BytesIO(await tar_res.bytes()), mode="r:gz")
-    site_pkgs = sysconfig.get_paths()["purelib"]
-    tar.extractall(site_pkgs, filter='data')
-    sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
+    url  = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
+    meta = await (await pyfetch(url)).json()
+    if "urls" not in meta:
+        raise ValueError(f"PyPI lookup failed for {pkg_name}: {meta}")
+    tar_url   = next(u["url"] for u in meta["urls"] if u["url"].endswith(".tar.gz"))
+    tar_bytes = await (await pyfetch(tar_url)).bytes()
+    tar  = tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz")
+    site = sysconfig.get_paths()["purelib"]
+    # filter="data" suppresses Python 3.12 DeprecationWarning and is the safe default
+    tar.extractall(site, filter="data")
+    sys.path.append(f"{site}/{meta['info']['name']}-{meta['info']['version']}")
 
 await install_tarball("construct", "2.10.67")
 await install_tarball("mgz")
-            `,
-            
-            PY_EXTRACTOR: `
+    `,
+
+    // Single-pass extractor: entities, gaia, commands, APM timestamps, age-ups.
+    PY_EXTRACT: `
 import json, traceback
 from mgz.summary import Summary
+
+PLAYER_IDS   = {1, 2, 3, 4, 5, 6, 7, 8}
+RESOURCE_IDS = {66: "gold", 102: "stone", 285: "relic"}
+AGE_TECH_IDS = {101: "Feudal", 102: "Castle", 103: "Imperial"}
+
 try:
-    with open('/replay.rec', 'rb') as f:
-        summary = Summary(f)
-        
-        all_objects = summary.get_objects()
-        
-        # VRAM FIX: player entities only (no Gaia)
-        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")}
-                     for o in all_objects
-                     if o.get("instance_id") is not None and o.get("player_number") in [1,2,3,4,5,6,7,8]]
-        
-        # Gaia resources for terrain canvas (zero WebGL cost)
-        RESOURCE_TYPES = {66: 'gold', 102: 'stone', 285: 'relic'}
-        gaia_objects = [{"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_TYPES[o.get("object_type")]}
-                        for o in all_objects
-                        if o.get("player_number") == 0 and o.get("object_type") in RESOURCE_TYPES and o.get("x") is not None]
-        
-        AGE_TECH = {101: 'Feudal', 102: 'Castle', 103: 'Imperial'}
-        commands = []
-        apm_ts = {"1": [], "2": []}
-        
-        for cmd in summary.get_commands():
-            pid = cmd.get('player_id')
-            ts = cmd.get('timestamp', 0)
-            ctype = cmd.get('type', '')
-            
-            # APM: count all player actions
-            if pid in [1, 2]:
-                apm_ts[str(pid)].append(ts)
-            
-            if ctype in ['move', 'build'] and 'position' in cmd and 'object_ids' in cmd:
-                commands.append({"t": ts, "type": "move", "ids": cmd['object_ids'], "x": cmd['position'][0], "y": cmd['position'][1], "p": pid})
-            elif ctype == 'delete' and 'object_ids' in cmd:
-                commands.append({"t": ts, "type": "delete", "ids": cmd['object_ids']})
-            elif ctype == 'resign':
-                commands.append({"t": ts, "type": "resign", "p": pid})
-            elif ctype == 'research' and cmd.get('technology_id') in AGE_TECH:
-                commands.append({"t": ts, "type": "age_up", "p": pid, "age": AGE_TECH[cmd['technology_id']]})
-        
-        map_data = summary.get_map()
-        payload = {
-            "duration": summary.get_duration(),
-            "map_size": map_data['size'],
-            "tiles": [[t['terrain_type'], t['elevation']] for t in map_data['tiles']],
-            "players": [{"name": p['name'], "civ": p.get('civilization') or str(p.get('civilization_id', 'Unknown')), "color": p['color_id']} for p in summary.get_players()],
-            "objects": init_objs,
-            "commands": commands,
-            "gaia_objects": gaia_objects,
-            "apm_ts": apm_ts
-        }
-    result = json.dumps({"status": "success", "data": payload})
-except Exception as e:
-    result = json.dumps({"status": "error", "message": str(e), "trace": traceback.format_exc()})
+    with open("/replay.rec", "rb") as f:
+        s = Summary(f)
+
+    all_objs = s.get_objects()
+
+    # VRAM: exclude Gaia from the WebGL entity pool
+    init_objs = [
+        {"id": o.get("instance_id"), "p": o.get("player_number"),
+         "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")}
+        for o in all_objs
+        if o.get("instance_id") is not None and o.get("player_number") in PLAYER_IDS
+    ]
+
+    # Gaia resources baked onto the HTML5 terrain canvas (zero WebGL cost)
+    gaia = [
+        {"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_IDS[o.get("object_type")]}
+        for o in all_objs
+        if o.get("player_number") == 0
+        and o.get("object_type") in RESOURCE_IDS
+        and o.get("x") is not None
+    ]
+
+    commands = []
+    apm_ts   = {"1": [], "2": []}
+
+    for cmd in s.get_commands():
+        pid   = cmd.get("player_id")
+        ts    = cmd.get("timestamp", 0)
+        ctype = cmd.get("type", "")
+
+        if pid in (1, 2):
+            apm_ts[str(pid)].append(ts)
+
+        if ctype in ("move", "build") and "position" in cmd and "object_ids" in cmd:
+            commands.append({"t": ts, "type": "move", "ids": cmd["object_ids"],
+                             "x": cmd["position"][0], "y": cmd["position"][1], "p": pid})
+        elif ctype == "delete" and "object_ids" in cmd:
+            commands.append({"t": ts, "type": "delete", "ids": cmd["object_ids"]})
+        elif ctype == "resign":
+            commands.append({"t": ts, "type": "resign", "p": pid})
+        elif ctype == "research" and cmd.get("technology_id") in AGE_TECH_IDS:
+            commands.append({"t": ts, "type": "age_up",
+                             "p": pid, "age": AGE_TECH_IDS[cmd["technology_id"]]})
+
+    map_data = s.get_map()
+    payload  = {
+        "duration":  s.get_duration(),
+        "map_size":  map_data["size"],
+        "tiles":     [[t["terrain_type"], t["elevation"]] for t in map_data["tiles"]],
+        "players":   [{"name": p["name"],
+                       "civ":  p.get("civilization") or str(p.get("civilization_id", "?")),
+                       "color": p["color_id"]}
+                      for p in s.get_players()],
+        "objects":   init_objs,
+        "commands":  commands,
+        "gaia":      gaia,
+        "apm_ts":    apm_ts,
+    }
+    result = json.dumps({"status": "ok", "data": payload})
+except Exception as exc:
+    result = json.dumps({"status": "error", "message": str(exc), "trace": traceback.format_exc()})
 result
-            `,
+    `,
 
-            processFile: async (file) => {
-                Logger.log(`Loading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`, "info");
-                Logger.status("Parsing binary... Please wait.", "#f39c12");
-                try {
-                    const arrayBuffer = await file.arrayBuffer();
-                    AgeVisState.pyodide.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
-                    
-                    const parsed = JSON.parse(await AgeVisState.pyodide.runPythonAsync(Parser.PY_EXTRACTOR));
-                    if (parsed.status === "error") {
-                        if (parsed.trace) Logger.log(`Python traceback:\n${parsed.trace}`, "error");
-                        throw new Error(parsed.message);
-                    }
+    processFile: async (file) => {
+        Logger.log(`Loading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)…`);
+        Logger.status('Parsing binary… please wait.', '#f39c12');
+        try {
+            AgeVisState.pyodide.FS.writeFile('/replay.rec', new Uint8Array(await file.arrayBuffer()));
+            const result = JSON.parse(await AgeVisState.pyodide.runPythonAsync(Parser.PY_EXTRACT));
 
-                    AgeVisState.rawPayload = parsed.data;
-                    Logger.log("Binary parsed successfully. Executing simulation...", "success", parsed.data);
-                    
-                    Simulation.compilePaths();
-                    Simulation.compileAPM();
-                    Simulation.cullCombatDeaths();
-                    Render.buildTerrainCache();
-                    UI.initPlayback();
-                    
-                    Logger.status("Ready.", "#2ecc71");
-                    Logger.log(`Engine Ready. Tracking ${Object.keys(AgeVisState.paths).length} entities.`, "success");
-                } catch (err) {
-                    Logger.log(`Parser Error: ${err.message}`, "error", err);
-                    Logger.status("Parsing Failed", "#e74c3c");
+            if (result.status === 'error') {
+                if (result.trace) Logger.log(`Python traceback:\n${result.trace}`, 'error');
+                throw new Error(result.message);
+            }
+
+            AgeVisState.rawPayload = result.data;
+            Logger.log(`Parsed OK — ${result.data.objects.length} entities, ${result.data.commands.length} commands.`, 'success');
+
+            Simulation.compilePaths();
+            Simulation.compileAPM();
+            Simulation.cullCombatDeaths();
+            Render.buildTerrainCache();
+            UI.initPlayback();
+
+            Logger.status('Ready.', '#2ecc71');
+            Logger.log(`Tracking ${Object.keys(AgeVisState.paths).length} entities.`, 'success');
+        } catch (err) {
+            Logger.log(`Parse error: ${err.message}`, 'error', err);
+            Logger.status('Parsing failed', '#e74c3c');
+        }
+    },
+};
+
+// ============================================================
+// 5. MATH
+// ============================================================
+const MathUtils = {
+    getPosAtTime(path, t) {
+        if (!path?.length) return null;
+        let pos = { x: path[0].x, y: path[0].y };
+        for (let i = 0; i < path.length - 1; i++) {
+            if (t >= path[i].t && t <= path[i+1].t) {
+                const dt   = path[i+1].t - path[i].t;
+                const prog = dt === 0 ? 1 : (t - path[i].t) / dt;
+                pos.x = path[i].x + (path[i+1].x - path[i].x) * prog;
+                pos.y = path[i].y + (path[i+1].y - path[i].y) * prog;
+                return { pos, isMoving: true, lastT: path[i].t };
+            }
+            if (t > path[i+1].t) { pos.x = path[i+1].x; pos.y = path[i+1].y; }
+        }
+        return { pos, isMoving: false, lastT: path[path.length - 1].t };
+    },
+};
+
+// ============================================================
+// 6. SIMULATION
+// ============================================================
+const Simulation = {
+    compilePaths() {
+        Object.values(AgeVisState.paths).forEach(ep => ep.gfx?.destroy());
+        AgeVisState.paths    = {};
+        AgeVisState.mapScale = Config.CANVAS_SIZE / AgeVisState.rawPayload.map_size;
+
+        const fallback = { render_shape: 'circle', Speed: 1.1, size: 2 };
+
+        // Seed T=0 entity snapshot
+        for (const obj of AgeVisState.rawPayload.objects) {
+            if (obj.x == null || obj.y == null) continue;
+            const stat  = AgeVisState.aoeData[obj.type_id] ?? fallback;
+            const label = (stat.internal_name ?? stat.name ?? `type:${obj.type_id ?? '?'}`).replace(/_/g, ' ');
+            const ep = Simulation._makeEntity(
+                [{ t: 0, x: obj.x, y: obj.y, p: obj.p,
+                   speed: stat.Speed ?? stat.speed ?? 1.1,
+                   shape: stat.render_shape, size: stat.size }],
+                label
+            );
+            AgeVisState.paths[obj.id] = ep;
+        }
+
+        // Walk command stream in time order
+        const cmds = [...AgeVisState.rawPayload.commands].sort((a, b) => a.t - b.t);
+        for (const cmd of cmds) {
+            if (cmd.type === 'resign') {
+                for (const ep of Object.values(AgeVisState.paths)) {
+                    if (ep.path[0]?.p === cmd.p)
+                        ep.deathTime = Math.min(ep.deathTime ?? Infinity, cmd.t);
+                }
+                continue;
+            }
+            if (cmd.type === 'delete') {
+                for (const id of (cmd.ids ?? [])) {
+                    if (AgeVisState.paths[id]) AgeVisState.paths[id].deathTime = cmd.t;
+                }
+                continue;
+            }
+            // FIX: age_up commands have no `ids` field — previously fell through
+            // into cmd.ids.forEach() and threw TypeError on every replay load.
+            if (cmd.type === 'age_up' || !cmd.ids) continue;
+
+            for (const uid of cmd.ids) {
+                if (!AgeVisState.paths[uid]) {
+                    AgeVisState.paths[uid] = Simulation._makeEntity(
+                        [{ t: cmd.t, x: cmd.x, y: cmd.y, p: cmd.p ?? null,
+                           speed: 1.1, shape: 'circle', size: 2 }],
+                        'Unknown Unit'
+                    );
+                }
+
+                const path     = AgeVisState.paths[uid].path;
+                let   lastNode = path[path.length - 1];
+
+                if (lastNode.t > cmd.t) {
+                    const prev = path[path.length - 2] ?? path[0];
+                    const dt   = lastNode.t - prev.t;
+                    const prog = dt === 0 ? 1 : (cmd.t - prev.t) / dt;
+                    lastNode.t = cmd.t;
+                    lastNode.x = prev.x + (lastNode.x - prev.x) * prog;
+                    lastNode.y = prev.y + (lastNode.y - prev.y) * prog;
+                } else if (lastNode.t < cmd.t) {
+                    path.push({ ...lastNode, t: cmd.t });
+                    lastNode = path[path.length - 1];
+                }
+
+                const dist = Math.hypot(cmd.x - lastNode.x, cmd.y - lastNode.y);
+                const spd  = lastNode.speed > 0 ? lastNode.speed : 1.1;
+                path.push({ ...lastNode, t: cmd.t + (dist / spd) * 1000, x: cmd.x, y: cmd.y });
+            }
+        }
+    },
+
+    // O(n²) combat death heuristic — fine for 1v1 entity counts
+    cullCombatDeaths() {
+        const ids = Object.keys(AgeVisState.paths);
+        for (const id of ids) {
+            const ep   = AgeVisState.paths[id];
+            const path = ep.path;
+            if (!path.length || ep.deathTime != null) continue;
+            const last = path[path.length - 1];
+            if (last.t > AgeVisState.rawPayload.duration - 15000) continue;
+
+            for (const eid of ids) {
+                if (eid === id) continue;
+                const eEp = AgeVisState.paths[eid];
+                if (eEp.path[0]?.p === last.p || eEp.path[0]?.p == null) continue;
+                if (eEp.deathTime != null && eEp.deathTime < last.t) continue;
+                const eState = MathUtils.getPosAtTime(eEp.path, last.t);
+                if (!eState) continue;
+                if (Math.hypot(last.x - eState.pos.x, last.y - eState.pos.y) <= 8) {
+                    ep.deathTime = last.t + 3000;
+                    break;
                 }
             }
-        };
+        }
+    },
 
-        // ==========================================
-        // 5. TOOLTIP & APM
-        // ==========================================
-        const Tooltip = {
-            _el: document.getElementById('tooltip'),
-            init: () => {
-                AgeVisState.pixi.app.canvas.addEventListener('mousemove', (e) => {
-                    if (Tooltip._el.style.display === 'block') {
-                        Tooltip._el.style.left = (e.clientX + 14) + 'px';
-                        Tooltip._el.style.top  = (e.clientY - 56) + 'px';
-                    }
-                });
-            },
-            show: (ep) => {
-                const base = ep.path[0];
-                if (!base) return;
-                const colorHex = '#' + (Config.COLORS[base.p] || 0x666666).toString(16).padStart(6, '0');
-                const pName = AgeVisState.rawPayload?.players[(base.p || 1) - 1]?.name || `Player ${base.p}`;
-                Tooltip._el.innerHTML =
-                    `<div style="font-weight:bold;margin-bottom:1px;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${colorHex};margin-right:6px;vertical-align:middle;border:1px solid #fff4;"></span>${ep.label}</div>` +
-                    `<div style="color:#888;font-size:11px;">${pName}</div>`;
-                Tooltip._el.style.display = 'block';
-            },
-            hide: () => { Tooltip._el.style.display = 'none'; }
-        };
+    compileAPM() {
+        AgeVisState.apm = {};
+        for (const [pid, ts] of Object.entries(AgeVisState.rawPayload.apm_ts ?? {})) {
+            AgeVisState.apm[pid] = [...ts].sort((a, b) => a - b);
+        }
+    },
 
-        const APMCalc = {
-            // O(log n) rolling 60-second window APM
-            get: (pid, timeMs) => {
-                const ts = AgeVisState.apm[pid];
-                if (!ts || ts.length === 0 || timeMs < 500) return 0;
-                const windowStart = Math.max(0, timeMs - 60000);
-                const windowMs    = Math.min(timeMs, 60000);
-                // lower bound: first index >= windowStart
-                let lo = 0, hi = ts.length;
-                while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] < windowStart) lo = mid + 1; else hi = mid; }
-                const startIdx = lo;
-                // upper bound: first index > timeMs
-                lo = startIdx; hi = ts.length;
-                while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] <= timeMs) lo = mid + 1; else hi = mid; }
-                return Math.round((lo - startIdx) * (60000 / windowMs));
-            }
-        };
+    _makeEntity(pathNodes, label) {
+        const g = new PIXI.Graphics();
+        g.eventMode = 'static';
+        AgeVisState.pixi.container.addChild(g);
+        const ep = { path: pathNodes, gfx: g, drawn: false, label };
+        g.on('pointerover', () => { if (g.visible) Tooltip.show(ep); });
+        g.on('pointerout',  () => Tooltip.hide());
+        return ep;
+    },
+};
 
-        // ==========================================
-        // 6. MATH & SIMULATION ENGINE
-        // ==========================================
-        const MathUtils = {
-            getPosAtTime: (path, t) => {
-                if (!path || path.length === 0) return null;
-                let pos = { x: path[0].x, y: path[0].y, p: path[0].p };
-                for (let i = 0; i < path.length - 1; i++) {
-                    if (t >= path[i].t && t <= path[i+1].t) {
-                        const dt = path[i+1].t - path[i].t;
-                        const prog = dt === 0 ? 1 : (t - path[i].t) / dt;
-                        pos.x = path[i].x + (path[i+1].x - path[i].x) * prog;
-                        pos.y = path[i].y + (path[i+1].y - path[i].y) * prog;
-                        return { pos, isMoving: true, lastT: path[i].t };
-                    } else if (t > path[i+1].t) {
-                        pos.x = path[i+1].x; pos.y = path[i+1].y;
-                    }
-                }
-                return { pos, isMoving: false, lastT: path[path.length - 1].t };
-            }
-        };
+// ============================================================
+// 7. RENDERER
+// ============================================================
+const Render = {
+    buildTerrainCache() {
+        if (AgeVisState.pixi.bg) {
+            AgeVisState.pixi.app.stage.removeChild(AgeVisState.pixi.bg);
+            AgeVisState.pixi.bg.destroy(true);
+        }
 
-        const Simulation = {
-            compilePaths: () => {
-                Object.values(AgeVisState.paths).forEach(ep => { if (ep.gfx) ep.gfx.destroy(); });
-                AgeVisState.paths = {};
-                AgeVisState.mapScale = Config.CANVAS_SIZE / AgeVisState.rawPayload.map_size;
+        const size      = AgeVisState.rawPayload.map_size;
+        const tileSize  = Config.CANVAS_SIZE / size;
+        const offscreen = document.createElement('canvas');
+        offscreen.width = offscreen.height = Config.CANVAS_SIZE;
+        const ctx = offscreen.getContext('2d');
 
-                const fallbackStat = { render_shape: "circle", speed: 1.1, size: 2 };
-
-                AgeVisState.rawPayload.objects.forEach(obj => {
-                    if (obj.x === undefined || obj.y === undefined) return;
-                    const stats = AgeVisState.aoeData[obj.type_id] || fallbackStat;
-                    const label = (stats.internal_name || stats.name || `type:${obj.type_id || '?'}`).replace(/_/g, ' ');
-                    
-                    const g = new PIXI.Graphics();
-                    g.eventMode = 'static';
-                    AgeVisState.pixi.container.addChild(g);
-                    
-                    const ep = {
-                        path: [{ t: 0, x: obj.x, y: obj.y, p: obj.p, speed: stats.Speed || stats.speed || 1.1, shape: stats.render_shape, size: stats.size }],
-                        gfx: g, drawn: false, typeId: obj.type_id, label
-                    };
-                    g.on('pointerover', () => { if (g.visible) Tooltip.show(ep); });
-                    g.on('pointerout',  () => Tooltip.hide());
-                    AgeVisState.paths[obj.id] = ep;
-                });
-
-                const sortedCmds = AgeVisState.rawPayload.commands.sort((a, b) => a.t - b.t);
-                sortedCmds.forEach(cmd => {
-                    if (cmd.type === 'resign') {
-                        Object.values(AgeVisState.paths).forEach(ep => { if (ep.path.length > 0 && ep.path[0].p === cmd.p) ep.deathTime = Math.min(ep.deathTime || Infinity, cmd.t); });
-                        return;
-                    }
-                    if (cmd.type === 'delete') {
-                        cmd.ids.forEach(id => { if (AgeVisState.paths[id]) AgeVisState.paths[id].deathTime = cmd.t; });
-                        return;
-                    }
-
-                    cmd.ids.forEach(unitId => {
-                        // Dynamic Entity Discovery
-                        if (!AgeVisState.paths[unitId]) {
-                            const g = new PIXI.Graphics();
-                            g.eventMode = 'static';
-                            AgeVisState.pixi.container.addChild(g);
-                            const ep = {
-                                path: [{ t: cmd.t, x: cmd.x, y: cmd.y, p: cmd.p || null, speed: 1.1, shape: 'circle', size: 2 }],
-                                gfx: g, drawn: false, typeId: null, label: 'Unknown Unit'
-                            };
-                            g.on('pointerover', () => { if (g.visible) Tooltip.show(ep); });
-                            g.on('pointerout',  () => Tooltip.hide());
-                            AgeVisState.paths[unitId] = ep;
-                        }
-
-                        const path = AgeVisState.paths[unitId].path;
-                        let lastNode = path[path.length - 1];
-
-                        if (lastNode.t > cmd.t) {
-                            const prevNode = path[path.length - 2] || path[0];
-                            const dt = lastNode.t - prevNode.t;
-                            const prog = dt === 0 ? 1 : (cmd.t - prevNode.t) / dt;
-                            lastNode.t = cmd.t;
-                            lastNode.x = prevNode.x + (lastNode.x - prevNode.x) * prog;
-                            lastNode.y = prevNode.y + (lastNode.y - prevNode.y) * prog;
-                        } else if (lastNode.t < cmd.t) {
-                            path.push({ t: cmd.t, x: lastNode.x, y: lastNode.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
-                            lastNode = path[path.length - 1];
-                        }
-
-                        const dist = Math.sqrt(Math.pow(cmd.x - lastNode.x, 2) + Math.pow(cmd.y - lastNode.y, 2));
-                        const travelMs = (dist / (lastNode.speed > 0 ? lastNode.speed : 1.1)) * 1000;
-                        path.push({ t: cmd.t + travelMs, x: cmd.x, y: cmd.y, p: lastNode.p, speed: lastNode.speed, shape: lastNode.shape, size: lastNode.size });
-                    });
-                });
-            },
-
-            cullCombatDeaths: () => {
-                const ids = Object.keys(AgeVisState.paths);
-                ids.forEach(id => {
-                    const ep = AgeVisState.paths[id];
-                    const path = ep.path;
-                    if (path.length === 0 || ep.deathTime) return;
-                    const lastNode = path[path.length - 1];
-                    if (lastNode.t > AgeVisState.rawPayload.duration - 15000) return;
-
-                    for (let i = 0; i < ids.length; i++) {
-                        const eEp = AgeVisState.paths[ids[i]];
-                        const ePath = eEp.path; 
-                        if (ids[i] === id || ePath[0].p === lastNode.p || ePath[0].p === null) continue;
-                        if (eEp.deathTime && eEp.deathTime < lastNode.t) continue;
-                        
-                        const eState = MathUtils.getPosAtTime(ePath, lastNode.t);
-                        if (!eState) continue;
-                        
-                        if (Math.sqrt(Math.pow(lastNode.x - eState.pos.x, 2) + Math.pow(lastNode.y - eState.pos.y, 2)) <= 8) {
-                            ep.deathTime = lastNode.t + 3000; break;
-                        }
-                    }
-                });
-            },
-
-            compileAPM: () => {
-                AgeVisState.apm = {};
-                const raw = AgeVisState.rawPayload.apm_ts || {};
-                for (const pid in raw) {
-                    AgeVisState.apm[pid] = (raw[pid] || []).slice().sort((a, b) => a - b);
+        // Terrain — row-major (y outer, x inner) matches mgz tile order
+        let idx = 0;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const [terrain, elev] = AgeVisState.rawPayload.tiles[idx++];
+                const cx = x * tileSize;
+                const cy = Config.CANVAS_SIZE - (y + 1) * tileSize;
+                ctx.fillStyle = Config.TERRAIN_COLORS[terrain] ?? Config.TERRAIN_COLORS._;
+                ctx.fillRect(cx, cy, tileSize, tileSize);
+                if (elev > 0) {
+                    ctx.fillStyle = `rgba(255,255,255,${elev * 0.12})`;
+                    ctx.fillRect(cx, cy, tileSize, tileSize);
                 }
             }
-        };
+        }
 
-        // ==========================================
-        // 7. PIXIJS RENDERER
-        // ==========================================
-        const Render = {
-            buildTerrainCache: () => {
-                if (AgeVisState.pixi.bg) { AgeVisState.pixi.app.stage.removeChild(AgeVisState.pixi.bg); AgeVisState.pixi.bg.destroy(true); }
-                
-                const offscreen = document.createElement('canvas');
-                offscreen.width = Config.CANVAS_SIZE; offscreen.height = Config.CANVAS_SIZE;
-                const ctx = offscreen.getContext('2d');
-                
-                const size = AgeVisState.rawPayload.map_size;
-                const tileSize = Config.CANVAS_SIZE / size;
+        // Gaia resources — baked here, zero WebGL objects
+        const r = Math.max(tileSize * 0.55, 3);
+        ctx.globalAlpha = 0.82;
+        for (const obj of (AgeVisState.rawPayload.gaia ?? [])) {
+            if (obj.x == null) continue;
+            ctx.beginPath();
+            ctx.arc(obj.x * tileSize, Config.CANVAS_SIZE - obj.y * tileSize, r, 0, Math.PI * 2);
+            ctx.fillStyle = Config.GAIA_COLORS[obj.rt] ?? '#888';
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
 
-                let tileIndex = 0;
-                for (let y = 0; y < size; y++) {
-                    for (let x = 0; x < size; x++) {
-                        const tile = AgeVisState.rawPayload.tiles[tileIndex];
-                        const cX = x * tileSize, cY = Config.CANVAS_SIZE - ((y + 1) * tileSize);
+        // FIX: PIXI.Texture.fromCanvas() does not exist in PixiJS v8 and throws
+        // TypeError at runtime. PIXI.Texture.from() is the correct v8 API for
+        // canvas elements and goes through the v8 asset detection system.
+        AgeVisState.pixi.bg = new PIXI.Sprite(PIXI.Texture.from(offscreen));
+        AgeVisState.pixi.app.stage.addChildAt(AgeVisState.pixi.bg, 0);
+    },
 
-                        ctx.fillStyle = Config.TERRAIN_COLORS[tile[0]] || Config.TERRAIN_COLORS.default;
-                        ctx.fillRect(cX, cY, tileSize, tileSize);
-                        if (tile[1] > 0) {
-                            ctx.fillStyle = `rgba(255, 255, 255, ${tile[1] * 0.12})`;
-                            ctx.fillRect(cX, cY, tileSize, tileSize);
-                        }
-                        tileIndex++;
-                    }
-                }
+    drawFrame(timeMs) {
+        if (!AgeVisState.rawPayload) return;
+        const stats = { 1: { pA:0, pT:0, bA:0, bT:0 }, 2: { pA:0, pT:0, bA:0, bT:0 } };
 
-                // Gaia resources — baked into terrain, zero WebGL cost
-                const gaiaColors = { gold: '#f0c030', stone: '#aaaaaa', relic: '#fffacc' };
-                (AgeVisState.rawPayload.gaia_objects || []).forEach(obj => {
-                    if (obj.x == null || obj.y == null) return;
-                    const cx = obj.x * tileSize;
-                    const cy = Config.CANVAS_SIZE - (obj.y * tileSize);
-                    const r  = Math.max(tileSize * 0.5, 3);
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-                    ctx.fillStyle = gaiaColors[obj.rt] || '#888';
-                    ctx.globalAlpha = 0.8;
-                    ctx.fill();
-                    ctx.globalAlpha = 1.0;
-                });
-                const texture = PIXI.Texture.fromCanvas(offscreen);
-                AgeVisState.pixi.bg = new PIXI.Sprite(texture);
-                AgeVisState.pixi.app.stage.addChildAt(AgeVisState.pixi.bg, 0); 
-            },
+        for (const ep of Object.values(AgeVisState.paths)) {
+            const path = ep.path;
+            const base = path[0];
+            const g    = ep.gfx;
+            const dead = ep.deathTime != null && timeMs >= ep.deathTime;
 
-            drawFrame: (timeMs) => {
-                if (!AgeVisState.rawPayload) return;
-                let stats = { 1: { pA: 0, pT: 0, bA: 0, bT: 0 }, 2: { pA: 0, pT: 0, bA: 0, bT: 0 } };
-
-                Object.keys(AgeVisState.paths).forEach(id => {
-                    const ep = AgeVisState.paths[id];
-                    const path = ep.path;
-                    const base = path[0];
-                    const g = ep.gfx;
-                    
-                    const isDead = ep.deathTime && timeMs >= ep.deathTime;
-                    
-                    if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
-                        const isBld = base.shape === 'square' || base.shape === 'building';
-                        if (isBld) { stats[base.p].bT++; if (!isDead) stats[base.p].bA++; } 
-                        else { stats[base.p].pT++; if (!isDead) stats[base.p].pA++; }
-                    }
-
-                    if (isDead || timeMs < base.t) { g.visible = false; return; }
-                    g.visible = true;
-
-                    if (!ep.drawn) {
-                        const rSize = Math.max(base.size * (AgeVisState.mapScale / 4), 2);
-                        if (base.shape === 'square' || base.shape === 'building') g.rect(-rSize, -rSize, rSize * 2, rSize * 2);
-                        else g.circle(0, 0, rSize);
-                        g.fill(Config.COLORS[base.p] || 0x666666);
-                        ep.drawn = true;
-                    }
-
-                    const state = MathUtils.getPosAtTime(path, timeMs);
-                    let alpha = 1.0;
-                    if (!state.isMoving && timeMs > state.lastT) {
-                        const idle = timeMs - state.lastT;
-                        if (idle > 60000) alpha = Math.max(0.3, 1.0 - ((idle - 60000) / 60000));
-                    }
-
-                    g.alpha = alpha;
-                    g.x = state.pos.x * AgeVisState.mapScale;
-                    g.y = Config.CANVAS_SIZE - (state.pos.y * AgeVisState.mapScale);
-                });
-
-                UI.updateTelemetry(timeMs, stats);
+            if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
+                const isBld   = base.shape === 'square' || base.shape === 'building';
+                const bucket  = stats[base.p];
+                if (isBld) { bucket.bT++; if (!dead) bucket.bA++; }
+                else        { bucket.pT++; if (!dead) bucket.pA++; }
             }
-        };
 
-        // ==========================================
-        // 8. UI & EVENT CONTROLLERS
-        // ==========================================
-        const UI = {
-            bindDropzone: () => {
-                const dz = document.getElementById('dropzone');
-                const fileInput = document.getElementById('file-input');
-                const btnBrowse = document.getElementById('btn-browse');
+            if (dead || timeMs < base.t) { g.visible = false; continue; }
+            g.visible = true;
 
-                dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('drag-over'); };
-                dz.ondragleave = () => dz.classList.remove('drag-over');
-                dz.ondrop = async (e) => { 
-                    e.preventDefault(); 
-                    dz.classList.remove('drag-over'); 
-                    if (e.dataTransfer.files.length > 0) Parser.processFile(e.dataTransfer.files[0]); 
-                };
-
-                btnBrowse.onclick = (e) => { e.stopPropagation(); fileInput.click(); };
-                dz.onclick = () => fileInput.click();
-                
-                fileInput.onchange = (e) => {
-                    if (e.target.files.length > 0) {
-                        Parser.processFile(e.target.files[0]);
-                        fileInput.value = ""; 
-                    }
-                };
-            },
-
-            initPlayback: () => {
-                const tl = document.getElementById('timeline');
-                tl.max = AgeVisState.rawPayload.duration; tl.disabled = false; tl.value = 0;
-                
-                // Age-up markers on timeline
-                const markerEl = document.getElementById('age-markers');
-                markerEl.innerHTML = '';
-                const AGE_COLORS = { Feudal: '#f39c12', Castle: '#e74c3c', Imperial: '#9b59b6' };
-                AgeVisState.rawPayload.commands.filter(c => c.type === 'age_up').forEach(ev => {
-                    const pct = (ev.t / AgeVisState.rawPayload.duration) * 100;
-                    const col = AGE_COLORS[ev.age] || '#fff';
-                    const pName = AgeVisState.rawPayload.players[(ev.p || 1) - 1]?.name || `P${ev.p}`;
-                    const m = document.createElement('div');
-                    m.className = 'age-marker';
-                    m.title = `${pName} → ${ev.age} Age`;
-                    m.style.cssText = `left:${pct}%;height:16px;background:${col};opacity:0.85;`;
-                    const lbl = document.createElement('span');
-                    lbl.className = 'age-marker-label';
-                    lbl.style.color = col;
-                    lbl.innerText = ev.age[0]; // F / C / I
-                    m.appendChild(lbl);
-                    markerEl.appendChild(m);
-                });
-
-                // Tooltip init
-                Tooltip.init();
-                
-                if (AgeVisState.rawPayload.players.length >= 2) {
-                    [0, 1].forEach(i => {
-                        const p = AgeVisState.rawPayload.players[i], cardNum = i+1;
-                        document.getElementById(`p${cardNum}-card`).style.display = 'block';
-                        document.getElementById(`p${cardNum}-card`).style.borderLeftColor = '#' + (Config.COLORS[p.color] || 0xFFFFFF).toString(16).padStart(6, '0');
-                        document.getElementById(`p${cardNum}-name`).innerText = p.name;
-                        document.getElementById(`p${cardNum}-civ`).innerText = `(${p.civ})`;
-                    });
-                }
-
-                const btnPlay = document.getElementById('btn-play');
-                const newBtnPlay = btnPlay.cloneNode(true);
-                btnPlay.parentNode.replaceChild(newBtnPlay, btnPlay);
-                newBtnPlay.addEventListener('click', UI.togglePlay);
-
-                const btnSpeed = document.getElementById('btn-speed');
-                const newBtnSpeed = btnSpeed.cloneNode(true);
-                btnSpeed.parentNode.replaceChild(newBtnSpeed, btnSpeed);
-                newBtnSpeed.addEventListener('click', UI.toggleSpeed);
-
-                tl.addEventListener('input', (e) => { 
-                    AgeVisState.playback.currentTime = parseInt(e.target.value); 
-                    Render.drawFrame(AgeVisState.playback.currentTime); 
-                });
-
-                Render.drawFrame(0);
-            },
-
-            togglePlay: () => {
-                AgeVisState.playback.isPlaying = !AgeVisState.playback.isPlaying; 
-                document.getElementById('btn-play').innerText = AgeVisState.playback.isPlaying ? "⏸ Pause" : "▶ Play";
-                if (AgeVisState.playback.isPlaying) { 
-                    AgeVisState.playback.lastFrameTime = performance.now(); 
-                    requestAnimationFrame(UI.tick); 
-                }
-            },
-
-            toggleSpeed: () => {
-                const s = AgeVisState.playback.speed;
-                AgeVisState.playback.speed = Config.SPEED_CYCLE[(Config.SPEED_CYCLE.indexOf(s) + 1) % Config.SPEED_CYCLE.length];
-                const btn = document.getElementById('btn-speed');
-                btn.innerText = AgeVisState.playback.speed + 'x';
-                btn.style.color = AgeVisState.playback.speed >= 8 ? '#f39c12' : 'white';
-            },
-
-            tick: (ts) => {
-                if (!AgeVisState.playback.isPlaying) return;
-                AgeVisState.playback.currentTime += (ts - AgeVisState.playback.lastFrameTime) * AgeVisState.playback.speed;
-                AgeVisState.playback.lastFrameTime = ts;
-                
-                if (AgeVisState.playback.currentTime > AgeVisState.rawPayload.duration) { 
-                    AgeVisState.playback.currentTime = AgeVisState.rawPayload.duration; 
-                    UI.togglePlay(); 
-                }
-                
-                document.getElementById('timeline').value = AgeVisState.playback.currentTime;
-                Render.drawFrame(AgeVisState.playback.currentTime);
-                if (AgeVisState.playback.isPlaying) requestAnimationFrame(UI.tick);
-            },
-
-            updateTelemetry: (timeMs, stats) => {
-                document.getElementById('time-display').innerText = new Date(timeMs).toISOString().substr(11, 8);
-                if (document.getElementById('p1-card').style.display === 'block') {
-                    document.getElementById('p1-pop').innerText = `${stats[1].pA} / ${stats[1].pT}`;
-                    document.getElementById('p1-bld').innerText = `${stats[1].bA} / ${stats[1].bT}`;
-                    document.getElementById('p1-apm').innerText = APMCalc.get('1', timeMs);
-                    document.getElementById('p2-pop').innerText = `${stats[2].pA} / ${stats[2].pT}`;
-                    document.getElementById('p2-bld').innerText = `${stats[2].bA} / ${stats[2].bT}`;
-                    document.getElementById('p2-apm').innerText = APMCalc.get('2', timeMs);
-                }
+            if (!ep.drawn) {
+                const rs = Math.max(base.size * (AgeVisState.mapScale / 4), 2);
+                if (base.shape === 'square' || base.shape === 'building') g.rect(-rs, -rs, rs*2, rs*2);
+                else g.circle(0, 0, rs);
+                g.fill(Config.PLAYER_COLORS[base.p] ?? 0x666666);
+                ep.drawn = true;
             }
-        };
 
-        // Bootstrap
-        Core.boot();
-    </script>
+            const state = MathUtils.getPosAtTime(path, timeMs);
+            if (!state) continue;
+
+            let alpha = 1;
+            if (!state.isMoving && timeMs > state.lastT) {
+                const idle = timeMs - state.lastT;
+                if (idle > 60000) alpha = Math.max(0.3, 1 - (idle - 60000) / 60000);
+            }
+            g.alpha = alpha;
+            g.x = state.pos.x * AgeVisState.mapScale;
+            g.y = Config.CANVAS_SIZE - state.pos.y * AgeVisState.mapScale;
+        }
+
+        UI.updateTelemetry(timeMs, stats);
+    },
+};
+
+// ============================================================
+// 8. TOOLTIP & APM
+// ============================================================
+const Tooltip = {
+    _el:    document.getElementById('tooltip'),
+    _bound: false,
+
+    // FIX: Must be called once from Core.boot(), never from initPlayback().
+    // Calling from initPlayback() would add a fresh mousemove listener on
+    // every replay file loaded — unbounded listener leak.
+    init() {
+        if (this._bound) return;
+        this._bound = true;
+        const canvas = AgeVisState.pixi.app.canvas;
+        canvas.addEventListener('mousemove', (e) => {
+            if (this._el.style.display === 'block') {
+                this._el.style.left = (e.clientX + 14) + 'px';
+                this._el.style.top  = (e.clientY - 56) + 'px';
+            }
+        });
+        canvas.addEventListener('mouseleave', () => this.hide());
+    },
+
+    show(ep) {
+        const base = ep.path[0];
+        if (!base) return;
+        const hex   = '#' + (Config.PLAYER_COLORS[base.p] ?? 0x666666).toString(16).padStart(6, '0');
+        const pName = AgeVisState.rawPayload?.players[(base.p ?? 1) - 1]?.name ?? `Player ${base.p}`;
+        this._el.innerHTML =
+            `<div class="tt-name"><span class="tt-dot" style="background:${hex}"></span>${ep.label}</div>` +
+            `<div class="tt-owner">${pName}</div>`;
+        this._el.style.display = 'block';
+    },
+
+    hide() { this._el.style.display = 'none'; },
+};
+
+const APMCalc = {
+    // O(log n) rolling 60-second window via binary search
+    get(pid, timeMs) {
+        const ts = AgeVisState.apm[pid];
+        if (!ts?.length || timeMs < 500) return 0;
+        const winStart = Math.max(0, timeMs - 60000);
+        const winMs    = Math.min(timeMs, 60000);
+
+        let lo = 0, hi = ts.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; ts[m] < winStart ? lo = m+1 : hi = m; }
+        const startIdx = lo;
+        lo = startIdx; hi = ts.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; ts[m] <= timeMs ? lo = m+1 : hi = m; }
+
+        return Math.round((lo - startIdx) * (60000 / winMs));
+    },
+};
+
+// ============================================================
+// 9. UI & EVENTS
+// ============================================================
+const UI = {
+    bindDropzone() {
+        const dz        = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const btnBrowse = document.getElementById('btn-browse');
+
+        dz.addEventListener('dragover',  (e) => { e.preventDefault(); dz.classList.add('drag-over'); });
+        dz.addEventListener('dragleave', ()  => dz.classList.remove('drag-over'));
+        dz.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dz.classList.remove('drag-over');
+            if (e.dataTransfer.files[0]) Parser.processFile(e.dataTransfer.files[0]);
+        });
+        btnBrowse.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+        dz.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files[0]) { Parser.processFile(e.target.files[0]); fileInput.value = ''; }
+        });
+    },
+
+    initPlayback() {
+        const tl  = document.getElementById('timeline');
+        const dur = AgeVisState.rawPayload.duration;
+        tl.max = dur; tl.disabled = false; tl.value = 0;
+
+        // Player cards
+        for (let i = 0; i < 2; i++) {
+            const p = AgeVisState.rawPayload.players[i];
+            if (!p) continue;
+            const n   = i + 1;
+            const col = '#' + (Config.PLAYER_COLORS[p.color] ?? 0xffffff).toString(16).padStart(6, '0');
+            const card = document.getElementById(`p${n}-card`);
+            card.style.display         = 'block';
+            card.style.borderLeftColor = col;
+            document.getElementById(`p${n}-name`).innerText = p.name;
+            document.getElementById(`p${n}-civ`).innerText  = `(${p.civ})`;
+        }
+
+        // Age-up timeline markers
+        const markerEl = document.getElementById('age-markers');
+        markerEl.innerHTML = '';
+        for (const ev of AgeVisState.rawPayload.commands.filter(c => c.type === 'age_up')) {
+            const pct  = (ev.t / dur) * 100;
+            const col  = Config.AGE_COLORS[ev.age] ?? '#fff';
+            const name = AgeVisState.rawPayload.players[(ev.p ?? 1) - 1]?.name ?? `P${ev.p}`;
+            const m    = document.createElement('div');
+            m.className = 'age-marker';
+            m.title     = `${name} → ${ev.age} Age`;
+            m.style.cssText = `left:${pct}%;height:18px;background:${col};opacity:0.9;`;
+            const lbl = document.createElement('span');
+            lbl.className   = 'age-marker-lbl';
+            lbl.style.color = col;
+            lbl.innerText   = ev.age[0];
+            m.appendChild(lbl);
+            markerEl.appendChild(m);
+        }
+
+        // Replace buttons to drop stale listeners from previous replays
+        UI._rewire('btn-play',  'click', UI.togglePlay);
+        UI._rewire('btn-speed', 'click', UI.toggleSpeed);
+        tl.addEventListener('input', (e) => {
+            AgeVisState.playback.currentTime = +e.target.value;
+            Render.drawFrame(AgeVisState.playback.currentTime);
+        });
+
+        Render.drawFrame(0);
+    },
+
+    _rewire(id, event, fn) {
+        const el  = document.getElementById(id);
+        const neo = el.cloneNode(true);
+        el.parentNode.replaceChild(neo, el);
+        neo.addEventListener(event, fn);
+    },
+
+    togglePlay() {
+        const pb = AgeVisState.playback;
+        pb.isPlaying = !pb.isPlaying;
+        document.getElementById('btn-play').innerText = pb.isPlaying ? '⏸ Pause' : '▶ Play';
+        if (pb.isPlaying) { pb.lastFrameTime = performance.now(); requestAnimationFrame(UI.tick); }
+    },
+
+    toggleSpeed() {
+        const pb  = AgeVisState.playback;
+        pb.speed  = Config.SPEED_CYCLE[(Config.SPEED_CYCLE.indexOf(pb.speed) + 1) % Config.SPEED_CYCLE.length];
+        const btn = document.getElementById('btn-speed');
+        btn.innerText   = pb.speed + 'x';
+        btn.style.color = pb.speed >= 8 ? '#f39c12' : '#ccc';
+    },
+
+    tick(ts) {
+        const pb = AgeVisState.playback;
+        if (!pb.isPlaying) return;
+        pb.currentTime   += (ts - pb.lastFrameTime) * pb.speed;
+        pb.lastFrameTime  = ts;
+        if (pb.currentTime >= AgeVisState.rawPayload.duration) {
+            pb.currentTime = AgeVisState.rawPayload.duration;
+            UI.togglePlay();
+        }
+        document.getElementById('timeline').value = pb.currentTime;
+        Render.drawFrame(pb.currentTime);
+        if (pb.isPlaying) requestAnimationFrame(UI.tick);
+    },
+
+    updateTelemetry(timeMs, stats) {
+        document.getElementById('time-display').innerText = new Date(timeMs).toISOString().slice(11, 19);
+        for (const n of [1, 2]) {
+            const card = document.getElementById(`p${n}-card`);
+            if (card.style.display !== 'block') continue;
+            const s = stats[n];
+            document.getElementById(`p${n}-pop`).innerText = `${s.pA} / ${s.pT}`;
+            document.getElementById(`p${n}-bld`).innerText = `${s.bA} / ${s.bT}`;
+            document.getElementById(`p${n}-apm`).innerText = APMCalc.get(String(n), timeMs);
+        }
+    },
+};
+
+// ============================================================
+// BOOTSTRAP
+// ============================================================
+Core.boot();
+</script>
 </body>
 </html>
