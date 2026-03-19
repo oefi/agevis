@@ -198,29 +198,25 @@ zstd = types.ModuleType("zstandard")
 zstd.ZstdDecompressor = lambda *args, **kwargs: JSDecompressor()
 sys.modules["zstandard"] = zstd
 
-# 1. Install official base dependencies
+# Install official base dependencies
 await install_tarball("construct", "2.8.16")
 await install_tarball("aocref")
 await install_tarball("tabulate")
 await install_tarball("mgz")
 
-# 2. THE JSDELIVR HOTFIX: Manually overwrite the broken DE parsing file
-# GitHub/AoEInsights/aoc-mgz updated this file to fix the 'expected 8 to 8' crash.
-# We fetch it directly from the CDN to bypass CORS restrictions.
-patch_url = "https://cdn.jsdelivr.net/gh/AoEInsights/aoc-mgz@master/mgz/header/de.py"
+# THE GITHUB RAW HOTFIX: Fetch the patched file natively, bypassing proxies/CDNs entirely
+patch_url = "https://raw.githubusercontent.com/AoEInsights/aoc-mgz/master/mgz/header/de.py"
 patch_res = await pyfetch(patch_url)
-patch_code = await patch_res.string()
 
-# Find the installed mgz directory and overwrite the file
-mgz_dir = None
-for path in sys.path:
-    if "mgz-1.8.51" in path:
-        mgz_dir = path
-        break
-
-if mgz_dir:
-    with open(f"{mgz_dir}/mgz/header/de.py", "w") as f:
-        f.write(patch_code)
+if patch_res.status == 200:
+    patch_code = await patch_res.string()
+    # Find where the base mgz library was installed in WASM RAM
+    for path in sys.path:
+        if "mgz-1.8.51" in path:
+            # Overwrite the broken py file with the patched one
+            with open(f"{path}/mgz/header/de.py", "w") as f:
+                f.write(patch_code)
+            break
             `,
             
             PY_EXTRACTOR: `
