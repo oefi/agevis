@@ -20,6 +20,7 @@
         button:hover { background: #e67e22; }
         #btn-speed { background: #444; color: white; width: 45px; }
     </style>
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=">
 </head>
 <body>
 
@@ -77,7 +78,7 @@
         const speedCycle = [1, 2, 4, 8];
         let staticBackground;
 
-        // --- 2. ENVIRONMENT BOOT ---
+// --- 2. ENVIRONMENT BOOT ---
         async function initEnvironment() {
             const stat = document.getElementById('status');
             try {
@@ -90,8 +91,12 @@
                 const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
                 const rawEngineData = await res.json();
                 
-                Object.values(rawEngineData.data.units).forEach(u => AOE_DAT[u.ID] = { ...u, render_shape: 'circle', size: 2 });
-                Object.values(rawEngineData.data.buildings).forEach(b => AOE_DAT[b.ID] = { ...b, render_shape: 'square', size: 5 });
+                // Defensive Data Extraction (Fixes the undefined object error)
+                const unitsData = rawEngineData.data?.units || rawEngineData.units || {};
+                const buildingsData = rawEngineData.data?.buildings || rawEngineData.buildings || {};
+
+                Object.values(unitsData).forEach(u => AOE_DAT[u.ID || u.id] = { ...u, render_shape: 'circle', size: 2 });
+                Object.values(buildingsData).forEach(b => AOE_DAT[b.ID || b.id] = { ...b, render_shape: 'square', size: 5 });
 
                 stat.innerText = "Loading Python Engine...";
                 pyodideInstance = await loadPyodide();
@@ -256,40 +261,50 @@ result
                 }
             });
         }
-
-        // --- 6. TERRAIN GENERATOR ---
+// --- 6. TERRAIN GENERATOR (HTML5 Canvas Optimization) ---
         function generateProceduralMap() {
             if (staticBackground) { app.stage.removeChild(staticBackground); staticBackground.destroy(); }
             
-            staticBackground = new PIXI.Graphics();
+            // Create an off-screen HTML5 Canvas to bypass WebGL vertex limits
+            const offscreen = document.createElement('canvas');
+            offscreen.width = CANVAS_SIZE;
+            offscreen.height = CANVAS_SIZE;
+            const ctx = offscreen.getContext('2d');
+            
             const size = ageVisData.map_size;
             const tileSize = CANVAS_SIZE / size;
 
+            // HTML5 Canvas requires CSS Hex strings, not 0x hex codes
             const terrainColors = {
-                0: 0x3b823b, 1: 0x2A3B9A, 2: 0x1E592F, 9: 0x3d7031, 
-                10: 0x112E0E, 12: 0x82643a, 13: 0x6e522b, 14: 0xab8854, 
-                19: 0x183815, 22: 0x1A2B15, 24: 0x999999, default: 0x4a5e3d
+                0: '#3b823b', 1: '#2A3B9A', 2: '#1E592F', 9: '#3d7031', 
+                10: '#112E0E', 12: '#82643a', 13: '#6e522b', 14: '#ab8854', 
+                19: '#183815', 22: '#1A2B15', 24: '#999999', default: '#4a5e3d'
             };
 
             let tileIndex = 0;
             for (let x = 0; x < size; x++) {
                 for (let y = 0; y < size; y++) {
                     const tile = ageVisData.tiles[tileIndex];
-                    const cX = x * tileSize, cY = CANVAS_SIZE - ((y + 1) * tileSize);
+                    const cX = x * tileSize;
+                    const cY = CANVAS_SIZE - ((y + 1) * tileSize);
 
-                    staticBackground.beginFill(terrainColors[tile[0]] || terrainColors.default);
-                    staticBackground.drawRect(cX, cY, tileSize, tileSize);
-                    staticBackground.endFill();
+                    // Draw Base Terrain
+                    ctx.fillStyle = terrainColors[tile[0]] || terrainColors.default;
+                    ctx.fillRect(cX, cY, tileSize, tileSize);
 
+                    // Draw Elevation Shadow/Highlight
                     if (tile[1] > 0) {
-                        staticBackground.beginFill(0xFFFFFF, tile[1] * 0.12);
-                        staticBackground.drawRect(cX, cY, tileSize, tileSize);
-                        staticBackground.endFill();
+                        ctx.fillStyle = `rgba(255, 255, 255, ${tile[1] * 0.12})`;
+                        ctx.fillRect(cX, cY, tileSize, tileSize);
                     }
                     tileIndex++;
                 }
             }
 
+            // Convert the flattened canvas into a single PixiJS Texture
+            const texture = PIXI.Texture.from(offscreen);
+            staticBackground = new PIXI.Sprite(texture);
+            
             // Ensure terrain rests at the very back
             app.stage.addChildAt(staticBackground, 0); 
         }
@@ -379,19 +394,20 @@ result
                     if (idle > 60000) alpha = Math.max(0.3, 1.0 - ((idle - 60000) / 60000));
                 }
 
-                const g = new PIXI.Graphics();
+const g = new PIXI.Graphics();
                 g.alpha = alpha;
-                g.beginFill(aoeColors[base.p] || 0x666666);
                 
                 const cX = state.pos.x * scale, cY = CANVAS_SIZE - (state.pos.y * scale);
                 const rSize = Math.max(base.size * (scale / 4), 2);
                 
+                // v8 Geometric Syntax
                 if (base.shape === 'square' || base.shape === 'building') {
-                    g.drawRect(cX - rSize, cY - rSize, rSize * 2, rSize * 2);
+                    g.rect(cX - rSize, cY - rSize, rSize * 2, rSize * 2);
                 } else {
-                    g.drawCircle(cX, cY, rSize);
+                    g.circle(cX, cY, rSize);
                 }
-                g.endFill();
+                
+                g.fill(aoeColors[base.p] || 0x666666); // v8 Fill Syntax
                 mapContainer.addChild(g);
             });
 
