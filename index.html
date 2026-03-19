@@ -89,7 +89,7 @@
         // --- 3. ENVIRONMENT BOOT ---
         async function initEnvironment() {
             const stat = document.getElementById('status');
-            try {
+try {
                 logSystem("Booting PixiJS v8 WebGL engine...", "info");
                 await app.init({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x111111 });
                 document.getElementById('canvas-container').appendChild(app.canvas);
@@ -107,11 +107,12 @@
 
                 logSystem("Initializing Python WebAssembly...", "info");
                 pyodideInstance = await loadPyodide();
-                await pyodideInstance.loadPackage("micropip");
                 
-                logSystem("Bypassing PyPI tarball for aoc-mgz...", "warning");
+                logSystem("Bypassing PyPI wheels for dependency tree...", "warning");
+                
+                // --- UNIVERSAL TARBALL INJECTOR ---
+                // Fetches raw source code from PyPI JSON API and injects into WASM RAM
                 await pyodideInstance.runPythonAsync(`
-import micropip
 import json
 from pyodide.http import pyfetch
 import tarfile
@@ -119,22 +120,35 @@ import io
 import sys
 import sysconfig
 
-await micropip.install(["construct==2.10.67"])
+async def install_tarball(pkg_name, version=""):
+    # 1. Query PyPI for the specific package
+    api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
+    res = await pyfetch(api_url)
+    data = await res.json()
+    
+    # 2. Locate the source .tar.gz file
+    tar_url = next(u["url"] for u in data["urls"] if u["url"].endswith(".tar.gz"))
+    tar_res = await pyfetch(tar_url)
+    tar_bytes = await tar_res.bytes()
+    
+    # 3. Extract into virtual site-packages
+    tar = tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz")
+    site_pkgs = sysconfig.get_paths()["purelib"]
+    tar.extractall(site_pkgs)
+    
+    # 4. Bind to sys.path so Python can import it natively
+    folder_name = f"{data['info']['name']}-{data['info']['version']}"
+    sys.path.append(f"{site_pkgs}/{folder_name}")
 
-response = await pyfetch("https://pypi.org/pypi/mgz/json")
-data = await response.json()
-url = data["urls"][0]["url"]
-version = data["info"]["version"]
-
-tar_response = await pyfetch(url)
-tar_data = await tar_response.bytes()
-tar = tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz")
-site_pkgs = sysconfig.get_paths()["purelib"]
-tar.extractall(site_pkgs)
-
-sys.path.append(f"{site_pkgs}/mgz-{version}")
+# Sequentially install the exact parser stack from source
+await install_tarball("construct", "2.10.67")
+await install_tarball("aocx")
+await install_tarball("aoc-mgz")
                 `);
                 
+                document.getElementById('status').innerText = "System Ready. Drop .aoe2record";
+                document.getElementById('status').style.color = "#2ecc71";
+                logSystem("System initialized and ready.", "success");
                 stat.innerText = "System Ready. Drop .aoe2record";
                 stat.style.color = "#2ecc71";
                 document.getElementById('dropzone').style.borderColor = "#2ecc71";
