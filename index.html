@@ -4,19 +4,28 @@
     <meta charset="UTF-8">
     <title>AgeVis - AoE2 Replay Visualizer</title>
     <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-    <script src="https://pixijs.download/release/pixi.js"></script>
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
-    <script src="https://unpkg.com/fzstd"></script>
+    <script src="https://pixijs.download/v8.9.2/pixi.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
     <style>
         body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
         #sidebar { width: 350px; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; display: flex; flex-direction: column; z-index: 10; }
         #main-view { flex-grow: 1; display: flex; flex-direction: column; background: #111; position: relative; }
         #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
         #playback-bar { height: 60px; background: #222; border-top: 2px solid #444; display: flex; align-items: center; padding: 0 20px; gap: 15px; z-index: 10; }
-        #timeline { flex-grow: 1; cursor: pointer; }
+        #timeline-wrapper { flex-grow: 1; position: relative; display: flex; align-items: center; }
+        #timeline { width: 100%; cursor: pointer; position: relative; z-index: 2; }
+        #age-markers { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; z-index: 1; }
+        .age-marker { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 3px; border-radius: 1px; pointer-events: auto; cursor: help; }
+        .age-marker-label { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); font-size: 9px; white-space: nowrap; margin-top: 2px; font-family: monospace; font-weight: bold; }
+        #tooltip { display: none; position: fixed; background: #1a1a1a; border: 1px solid #555; border-radius: 4px; padding: 6px 10px; font-size: 13px; font-family: sans-serif; pointer-events: none; z-index: 1000; max-width: 220px; line-height: 1.6; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
         .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12 !important; }
         .stats-box { background: #1a1a1a; padding: 10px; border-radius: 4px; font-size: 14px; margin-bottom: 15px; }
-        .log { color: #aaa; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; flex-grow: 1; margin-top: 0; padding-top: 5px; border-top: none; margin-bottom: 0; }
+        .log { color: #aaa; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; flex-grow: 1; margin-top: auto; border-top: 2px solid #444; margin-bottom: 0; padding-top: 10px; }
+        .log-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; border-top: 2px solid #444; margin-top: auto; flex-shrink: 0; }
+        .log-toolbar span { color: #777; font-size: 11px; flex-grow: 1; font-family: monospace; }
+        .log-btn { background: #333; color: #aaa; border: 1px solid #555; padding: 2px 8px; font-size: 11px; font-weight: normal; border-radius: 3px; cursor: pointer; }
+        .log-btn:hover { background: #444; color: white; }
+        .badge-1v1 { display: inline-block; background: #2a1a00; color: #f39c12; border: 1px solid #f39c12; border-radius: 3px; font-size: 10px; font-weight: bold; padding: 1px 5px; vertical-align: middle; margin-left: 6px; letter-spacing: 0.5px; }
         button { background: #f39c12; color: #111; border: none; padding: 6px 12px; font-weight: bold; cursor: pointer; border-radius: 3px; }
         button:hover { background: #e67e22; }
         #btn-speed { background: #444; color: white; width: 45px; }
@@ -25,10 +34,11 @@
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0; color: #f39c12; border-bottom: 2px solid #444; padding-bottom: 10px;">AgeVis Engine</h2>
+        <h2 style="margin-top:0; color: #f39c12; border-bottom: 2px solid #444; padding-bottom: 10px;">AgeVis Engine <span class="badge-1v1">1v1</span></h2>
         
         <div id="dropzone" style="padding: 20px 15px; border: 2px dashed #666; text-align: center; margin-bottom: 15px; cursor: pointer; transition: 0.2s; border-radius: 6px; background: #222;">
-            <span id="status" style="color: #f39c12; font-weight: bold; display: block; margin-bottom: 12px; font-size: 15px;">Initializing Engine...</span>
+            <span id="status" style="color: #f39c12; font-weight: bold; display: block; margin-bottom: 8px; font-size: 15px;">Initializing Engine...</span>
+            <span style="color: #666; font-size: 11px; display: block; margin-bottom: 12px;">1v1 replays only &mdash; .aoe2record</span>
             <input type="file" id="file-input" accept=".aoe2record" style="display: none;">
             <button id="btn-browse" style="display: none; margin: 0 auto; background: #3498db; color: white;">📂 Browse File</button>
         </div>
@@ -39,6 +49,7 @@
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px;">
                 <div>Pop (Alive/Total):</div> <div id="p1-pop" style="text-align: right; color: #2ecc71;">0 / 0</div>
                 <div>Buildings:</div> <div id="p1-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
+                <div>APM:</div> <div id="p1-apm" style="text-align: right; color: #3498db;">—</div>
             </div>
         </div>
 
@@ -48,12 +59,13 @@
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px;">
                 <div>Pop (Alive/Total):</div> <div id="p2-pop" style="text-align: right; color: #2ecc71;">0 / 0</div>
                 <div>Buildings:</div> <div id="p2-bld" style="text-align: right; color: #f39c12;">0 / 0</div>
+                <div>APM:</div> <div id="p2-apm" style="text-align: right; color: #3498db;">—</div>
             </div>
         </div>
-        
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: auto; padding-top: 15px; border-top: 2px solid #444;">
-            <strong style="color: #aaa; font-size: 12px;">System Console</strong>
-            <button id="btn-copy" style="background: #444; color: white; border: none; padding: 4px 8px; font-size: 11px; cursor: pointer; border-radius: 3px; transition: 0.2s;">📋 Copy</button>
+        <div class="log-toolbar">
+            <span id="log-count">0 events</span>
+            <button class="log-btn" onclick="navigator.clipboard.writeText(document.getElementById('output').innerText).then(()=>this.innerText='Copied!',setTimeout(()=>this.innerText='Copy',1500))">Copy</button>
+            <button class="log-btn" onclick="document.getElementById('output').innerHTML='';document.getElementById('log-count').innerText='0 events';Logger._count=0;">Clear</button>
         </div>
         <div class="log" id="output"></div>
     </div>
@@ -64,9 +76,14 @@
             <button id="btn-play">▶ Play</button>
             <button id="btn-speed">1x</button>
             <span id="time-display" style="font-family: monospace; font-size: 14px; width: 65px; color: #2ecc71;">00:00:00</span>
-            <input type="range" id="timeline" min="0" max="100" value="0" disabled>
+            <div id="timeline-wrapper">
+                <input type="range" id="timeline" min="0" max="100" value="0" disabled>
+                <div id="age-markers"></div>
+            </div>
         </div>
     </div>
+
+    <div id="tooltip"></div>
 
     <script>
         // ==========================================
@@ -84,23 +101,31 @@
             aoeData: {}, 
             rawPayload: null,
             paths: {},
+            apm: {},
             mapScale: 1,
             playback: { isPlaying: false, currentTime: 0, lastFrameTime: 0, speed: 1 },
             pixi: { app: new PIXI.Application(), container: new PIXI.Container(), bg: null }
         };
 
         // ==========================================
-        // 2. DUAL-CHANNEL LOGGER & UTILS
+        // 2. DUAL-CHANNEL LOGGER
         // ==========================================
         const Logger = {
             _dom: document.getElementById('output'),
             _stat: document.getElementById('status'),
+            _count: 0,
             _colors: { info: "#3498db", success: "#2ecc71", error: "#e74c3c", warning: "#f39c12" },
             
             log: (msg, type = "info", obj = null) => {
                 const time = new Date().toLocaleTimeString([], { hour12: false });
-                Logger._dom.innerHTML = `<span style="color: #777;">[${time}]</span> <span style="color: ${Logger._colors[type]};">${msg}</span><br>` + Logger._dom.innerHTML;
-                if (type === "error") console.error(`[AgeVis] ${msg}`, obj || "");
+                const errDetail = (type === "error" && obj) ? `\n  ↳ ${obj.stack ? obj.stack.split('\n').slice(0,2).join(' | ') : String(obj)}` : '';
+                Logger._dom.innerHTML = `<span style="color: #555;">[${time}]</span> <span style="color: ${Logger._colors[type]};">${msg}</span>${errDetail ? `<span style="color:#664444;font-size:11px;">${errDetail}</span>` : ''}<br>` + Logger._dom.innerHTML;
+                Logger._count++;
+                const errCount = (Logger._dom.innerHTML.match(/color: #e74c3c/g)||[]).length;
+                const warnCount = (Logger._dom.innerHTML.match(/color: #f39c12/g)||[]).length;
+                const cntEl = document.getElementById('log-count');
+                if (cntEl) cntEl.innerText = `${Logger._count} events${errCount ? ` · ${errCount} err` : ''}${warnCount ? ` · ${warnCount} warn` : ''}`;
+                if (type === "error") { console.error(`[AgeVis] ${msg}`, obj || ""); cntEl && (cntEl.style.color = '#e74c3c'); }
                 else if (type === "warning") console.warn(`[AgeVis] ${msg}`, obj || "");
                 else console.log(`[AgeVis] ${msg}`, obj || "");
             },
@@ -110,29 +135,18 @@
             }
         };
 
-        document.getElementById('btn-copy').addEventListener('click', () => {
-            const logText = document.getElementById('output').innerText;
-            navigator.clipboard.writeText(logText).then(() => {
-                const btn = document.getElementById('btn-copy');
-                btn.innerText = "✅ Copied!";
-                btn.style.background = "#2ecc71";
-                setTimeout(() => {
-                    btn.innerText = "📋 Copy";
-                    btn.style.background = "#444";
-                }, 2000);
-            });
-        });
-
         // ==========================================
         // 3. ENGINE INITIALIZATION
         // ==========================================
         const Core = {
             boot: async () => {
-try {
+                try {
                     Logger.log("Booting PixiJS v8 WebGL engine...", "info");
                     await AgeVisState.pixi.app.init({ width: Config.CANVAS_SIZE, height: Config.CANVAS_SIZE, backgroundColor: 0x111111 });
                     document.getElementById('canvas-container').appendChild(AgeVisState.pixi.app.canvas);
                     AgeVisState.pixi.app.stage.addChild(AgeVisState.pixi.container);
+                    AgeVisState.pixi.container.eventMode = 'static';
+                    AgeVisState.pixi.container.interactiveChildren = true;
 
                     Logger.log("Fetching Genie Engine Data (3MB)...", "info");
                     const res = await fetch('https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data/data.json');
@@ -145,7 +159,10 @@ try {
 
                     Logger.log("Initializing Pyodide WASM & Resolving dependencies...", "info");
                     AgeVisState.pyodide = await loadPyodide();
-                    await AgeVisState.pyodide.loadPackage("micropip"); 
+                    
+                    // Load native packages via loadPackage (C extensions — micropip can't handle these)
+                    await AgeVisState.pyodide.loadPackage(["micropip", "zstandard"]);
+                    
                     await AgeVisState.pyodide.runPythonAsync(Parser.PY_DEPENDENCY_INJECTOR);
                     
                     Logger.status("System Ready. Drop or Select File", "#2ecc71");
@@ -155,7 +172,6 @@ try {
                     
                     Logger.log("System initialized.", "success");
                     UI.bindDropzone();
-                
                 } catch (error) {
                     Logger.status("Engine Boot Failed.", "#e74c3c");
                     Logger.log(`Initialization Error: ${error.message}`, "error", error);
@@ -166,20 +182,18 @@ try {
         // ==========================================
         // 4. PYTHON INTEROP & PARSER
         // ==========================================
-const Parser = {
+        const Parser = {
             PY_DEPENDENCY_INJECTOR: `
-import json, tarfile, io, sys, sysconfig, types
+import json, tarfile, io, sys, sysconfig
 from pyodide.http import pyfetch
-import pyodide.ffi
-import js
 import micropip
-
-await micropip.install(["hashlib"])
 
 async def install_tarball(pkg_name, version=""):
     api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
     res = await pyfetch(api_url)
     data = await res.json()
+    if "urls" not in data:
+        raise ValueError(f"Package {pkg_name} not found. Response: {data}")
     tar_url = next(u["url"] for u in data["urls"] if u["url"].endswith(".tar.gz"))
     tar_res = await pyfetch(tar_url)
     tar = tarfile.open(fileobj=io.BytesIO(await tar_res.bytes()), mode="r:gz")
@@ -187,70 +201,66 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
-# --- ZSTD DECOMPRESSION BRIDGE ---
-class JSDecompressor:
-    def decompress(self, data, *args, **kwargs):
-        js_data = pyodide.ffi.to_js(data)
-        decompressed = js.window.fzstd.decompress(js_data)
-        return bytes(decompressed)
-
-zstd = types.ModuleType("zstandard")
-zstd.ZstdDecompressor = lambda *args, **kwargs: JSDecompressor()
-sys.modules["zstandard"] = zstd
-
-# Install official base dependencies
-await install_tarball("construct", "2.8.16")
-await install_tarball("aocref")
-await install_tarball("tabulate")
+await install_tarball("construct", "2.10.67")
 await install_tarball("mgz")
-
-# THE GITHUB RAW HOTFIX: Fetch the patched file natively, bypassing proxies/CDNs entirely
-patch_url = "https://raw.githubusercontent.com/AoEInsights/aoc-mgz/master/mgz/header/de.py"
-patch_res = await pyfetch(patch_url)
-
-if patch_res.status == 200:
-    patch_code = await patch_res.string()
-    # Find where the base mgz library was installed in WASM RAM
-    for path in sys.path:
-        if "mgz-1.8.51" in path:
-            # Overwrite the broken py file with the patched one
-            with open(f"{path}/mgz/header/de.py", "w") as f:
-                f.write(patch_code)
-            break
             `,
             
             PY_EXTRACTOR: `
-import json
+import json, traceback
 from mgz.summary import Summary
 try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
         
-        # VRAM FIX: Filter out Gaia objects
-        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")} for o in summary.get_objects() if o.get("instance_id") is not None and o.get("player_number") in [1, 2, 3, 4, 5, 6, 7, 8]]
+        all_objects = summary.get_objects()
         
+        # VRAM FIX: player entities only (no Gaia)
+        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")}
+                     for o in all_objects
+                     if o.get("instance_id") is not None and o.get("player_number") in [1,2,3,4,5,6,7,8]]
+        
+        # Gaia resources for terrain canvas (zero WebGL cost)
+        RESOURCE_TYPES = {66: 'gold', 102: 'stone', 285: 'relic'}
+        gaia_objects = [{"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_TYPES[o.get("object_type")]}
+                        for o in all_objects
+                        if o.get("player_number") == 0 and o.get("object_type") in RESOURCE_TYPES and o.get("x") is not None]
+        
+        AGE_TECH = {101: 'Feudal', 102: 'Castle', 103: 'Imperial'}
         commands = []
+        apm_ts = {"1": [], "2": []}
+        
         for cmd in summary.get_commands():
-            if cmd['type'] in ['move', 'build'] and 'position' in cmd and 'object_ids' in cmd:
-                commands.append({"t": cmd['timestamp'], "type": "move", "ids": cmd['object_ids'], "x": cmd['position'][0], "y": cmd['position'][1], "p": cmd.get('player_id')})
-            elif cmd['type'] == 'delete' and 'object_ids' in cmd:
-                commands.append({"t": cmd['timestamp'], "type": "delete", "ids": cmd['object_ids']})
-            elif cmd['type'] == 'resign':
-                commands.append({"t": cmd['timestamp'], "type": "resign", "p": cmd['player_id']})
-
+            pid = cmd.get('player_id')
+            ts = cmd.get('timestamp', 0)
+            ctype = cmd.get('type', '')
+            
+            # APM: count all player actions
+            if pid in [1, 2]:
+                apm_ts[str(pid)].append(ts)
+            
+            if ctype in ['move', 'build'] and 'position' in cmd and 'object_ids' in cmd:
+                commands.append({"t": ts, "type": "move", "ids": cmd['object_ids'], "x": cmd['position'][0], "y": cmd['position'][1], "p": pid})
+            elif ctype == 'delete' and 'object_ids' in cmd:
+                commands.append({"t": ts, "type": "delete", "ids": cmd['object_ids']})
+            elif ctype == 'resign':
+                commands.append({"t": ts, "type": "resign", "p": pid})
+            elif ctype == 'research' and cmd.get('technology_id') in AGE_TECH:
+                commands.append({"t": ts, "type": "age_up", "p": pid, "age": AGE_TECH[cmd['technology_id']]})
+        
         map_data = summary.get_map()
         payload = {
             "duration": summary.get_duration(),
             "map_size": map_data['size'],
             "tiles": [[t['terrain_type'], t['elevation']] for t in map_data['tiles']],
-            "players": [{"name": p['name'], "civ": p['civilization'], "color": p['color_id']} for p in summary.get_players()],
+            "players": [{"name": p['name'], "civ": p.get('civilization') or str(p.get('civilization_id', 'Unknown')), "color": p['color_id']} for p in summary.get_players()],
             "objects": init_objs,
-            "commands": commands
+            "commands": commands,
+            "gaia_objects": gaia_objects,
+            "apm_ts": apm_ts
         }
     result = json.dumps({"status": "success", "data": payload})
 except Exception as e:
-    import traceback
-    result = json.dumps({"status": "error", "message": traceback.format_exc()})
+    result = json.dumps({"status": "error", "message": str(e), "trace": traceback.format_exc()})
 result
             `,
 
@@ -261,13 +271,17 @@ result
                     const arrayBuffer = await file.arrayBuffer();
                     AgeVisState.pyodide.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
                     
-                    const parsed = JSON.parse(AgeVisState.pyodide.runPython(Parser.PY_EXTRACTOR));
-                    if (parsed.status === "error") throw new Error(parsed.message);
+                    const parsed = JSON.parse(await AgeVisState.pyodide.runPythonAsync(Parser.PY_EXTRACTOR));
+                    if (parsed.status === "error") {
+                        if (parsed.trace) Logger.log(`Python traceback:\n${parsed.trace}`, "error");
+                        throw new Error(parsed.message);
+                    }
 
                     AgeVisState.rawPayload = parsed.data;
                     Logger.log("Binary parsed successfully. Executing simulation...", "success", parsed.data);
                     
                     Simulation.compilePaths();
+                    Simulation.compileAPM();
                     Simulation.cullCombatDeaths();
                     Render.buildTerrainCache();
                     UI.initPlayback();
@@ -282,7 +296,51 @@ result
         };
 
         // ==========================================
-        // 5. MATH & SIMULATION ENGINE
+        // 5. TOOLTIP & APM
+        // ==========================================
+        const Tooltip = {
+            _el: document.getElementById('tooltip'),
+            init: () => {
+                AgeVisState.pixi.app.canvas.addEventListener('mousemove', (e) => {
+                    if (Tooltip._el.style.display === 'block') {
+                        Tooltip._el.style.left = (e.clientX + 14) + 'px';
+                        Tooltip._el.style.top  = (e.clientY - 56) + 'px';
+                    }
+                });
+            },
+            show: (ep) => {
+                const base = ep.path[0];
+                if (!base) return;
+                const colorHex = '#' + (Config.COLORS[base.p] || 0x666666).toString(16).padStart(6, '0');
+                const pName = AgeVisState.rawPayload?.players[(base.p || 1) - 1]?.name || `Player ${base.p}`;
+                Tooltip._el.innerHTML =
+                    `<div style="font-weight:bold;margin-bottom:1px;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${colorHex};margin-right:6px;vertical-align:middle;border:1px solid #fff4;"></span>${ep.label}</div>` +
+                    `<div style="color:#888;font-size:11px;">${pName}</div>`;
+                Tooltip._el.style.display = 'block';
+            },
+            hide: () => { Tooltip._el.style.display = 'none'; }
+        };
+
+        const APMCalc = {
+            // O(log n) rolling 60-second window APM
+            get: (pid, timeMs) => {
+                const ts = AgeVisState.apm[pid];
+                if (!ts || ts.length === 0 || timeMs < 500) return 0;
+                const windowStart = Math.max(0, timeMs - 60000);
+                const windowMs    = Math.min(timeMs, 60000);
+                // lower bound: first index >= windowStart
+                let lo = 0, hi = ts.length;
+                while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] < windowStart) lo = mid + 1; else hi = mid; }
+                const startIdx = lo;
+                // upper bound: first index > timeMs
+                lo = startIdx; hi = ts.length;
+                while (lo < hi) { const mid = (lo + hi) >> 1; if (ts[mid] <= timeMs) lo = mid + 1; else hi = mid; }
+                return Math.round((lo - startIdx) * (60000 / windowMs));
+            }
+        };
+
+        // ==========================================
+        // 6. MATH & SIMULATION ENGINE
         // ==========================================
         const MathUtils = {
             getPosAtTime: (path, t) => {
@@ -314,37 +372,45 @@ result
                 AgeVisState.rawPayload.objects.forEach(obj => {
                     if (obj.x === undefined || obj.y === undefined) return;
                     const stats = AgeVisState.aoeData[obj.type_id] || fallbackStat;
+                    const label = (stats.internal_name || stats.name || `type:${obj.type_id || '?'}`).replace(/_/g, ' ');
                     
                     const g = new PIXI.Graphics();
+                    g.eventMode = 'static';
                     AgeVisState.pixi.container.addChild(g);
                     
-                    AgeVisState.paths[obj.id] = {
+                    const ep = {
                         path: [{ t: 0, x: obj.x, y: obj.y, p: obj.p, speed: stats.Speed || stats.speed || 1.1, shape: stats.render_shape, size: stats.size }],
-                        gfx: g,
-                        drawn: false
+                        gfx: g, drawn: false, typeId: obj.type_id, label
                     };
+                    g.on('pointerover', () => { if (g.visible) Tooltip.show(ep); });
+                    g.on('pointerout',  () => Tooltip.hide());
+                    AgeVisState.paths[obj.id] = ep;
                 });
 
                 const sortedCmds = AgeVisState.rawPayload.commands.sort((a, b) => a.t - b.t);
                 sortedCmds.forEach(cmd => {
                     if (cmd.type === 'resign') {
-                        Object.values(AgeVisState.paths).forEach(ep => { if (ep.path.length > 0 && ep.path[0].p === cmd.p) ep.path.deathTime = Math.min(ep.path.deathTime || Infinity, cmd.t); });
+                        Object.values(AgeVisState.paths).forEach(ep => { if (ep.path.length > 0 && ep.path[0].p === cmd.p) ep.deathTime = Math.min(ep.deathTime || Infinity, cmd.t); });
                         return;
                     }
                     if (cmd.type === 'delete') {
-                        cmd.ids.forEach(id => { if (AgeVisState.paths[id]) AgeVisState.paths[id].path.deathTime = cmd.t; });
+                        cmd.ids.forEach(id => { if (AgeVisState.paths[id]) AgeVisState.paths[id].deathTime = cmd.t; });
                         return;
                     }
 
                     cmd.ids.forEach(unitId => {
+                        // Dynamic Entity Discovery
                         if (!AgeVisState.paths[unitId]) {
                             const g = new PIXI.Graphics();
+                            g.eventMode = 'static';
                             AgeVisState.pixi.container.addChild(g);
-                            AgeVisState.paths[unitId] = {
+                            const ep = {
                                 path: [{ t: cmd.t, x: cmd.x, y: cmd.y, p: cmd.p || null, speed: 1.1, shape: 'circle', size: 2 }],
-                                gfx: g,
-                                drawn: false
+                                gfx: g, drawn: false, typeId: null, label: 'Unknown Unit'
                             };
+                            g.on('pointerover', () => { if (g.visible) Tooltip.show(ep); });
+                            g.on('pointerout',  () => Tooltip.hide());
+                            AgeVisState.paths[unitId] = ep;
                         }
 
                         const path = AgeVisState.paths[unitId].path;
@@ -372,29 +438,39 @@ result
             cullCombatDeaths: () => {
                 const ids = Object.keys(AgeVisState.paths);
                 ids.forEach(id => {
-                    const path = AgeVisState.paths[id].path;
-                    if (path.length === 0 || path.deathTime) return;
+                    const ep = AgeVisState.paths[id];
+                    const path = ep.path;
+                    if (path.length === 0 || ep.deathTime) return;
                     const lastNode = path[path.length - 1];
                     if (lastNode.t > AgeVisState.rawPayload.duration - 15000) return;
 
                     for (let i = 0; i < ids.length; i++) {
-                        const ePath = AgeVisState.paths[ids[i]].path; 
+                        const eEp = AgeVisState.paths[ids[i]];
+                        const ePath = eEp.path; 
                         if (ids[i] === id || ePath[0].p === lastNode.p || ePath[0].p === null) continue;
-                        if (ePath.deathTime && ePath.deathTime < lastNode.t) continue;
+                        if (eEp.deathTime && eEp.deathTime < lastNode.t) continue;
                         
                         const eState = MathUtils.getPosAtTime(ePath, lastNode.t);
                         if (!eState) continue;
                         
                         if (Math.sqrt(Math.pow(lastNode.x - eState.pos.x, 2) + Math.pow(lastNode.y - eState.pos.y, 2)) <= 8) {
-                            path.deathTime = lastNode.t + 3000; break;
+                            ep.deathTime = lastNode.t + 3000; break;
                         }
                     }
                 });
+            },
+
+            compileAPM: () => {
+                AgeVisState.apm = {};
+                const raw = AgeVisState.rawPayload.apm_ts || {};
+                for (const pid in raw) {
+                    AgeVisState.apm[pid] = (raw[pid] || []).slice().sort((a, b) => a - b);
+                }
             }
         };
 
         // ==========================================
-        // 6. PIXIJS RENDERER
+        // 7. PIXIJS RENDERER
         // ==========================================
         const Render = {
             buildTerrainCache: () => {
@@ -408,8 +484,8 @@ result
                 const tileSize = Config.CANVAS_SIZE / size;
 
                 let tileIndex = 0;
-                for (let x = 0; x < size; x++) {
-                    for (let y = 0; y < size; y++) {
+                for (let y = 0; y < size; y++) {
+                    for (let x = 0; x < size; x++) {
                         const tile = AgeVisState.rawPayload.tiles[tileIndex];
                         const cX = x * tileSize, cY = Config.CANVAS_SIZE - ((y + 1) * tileSize);
 
@@ -422,7 +498,22 @@ result
                         tileIndex++;
                     }
                 }
-                const texture = PIXI.Texture.from(offscreen);
+
+                // Gaia resources — baked into terrain, zero WebGL cost
+                const gaiaColors = { gold: '#f0c030', stone: '#aaaaaa', relic: '#fffacc' };
+                (AgeVisState.rawPayload.gaia_objects || []).forEach(obj => {
+                    if (obj.x == null || obj.y == null) return;
+                    const cx = obj.x * tileSize;
+                    const cy = Config.CANVAS_SIZE - (obj.y * tileSize);
+                    const r  = Math.max(tileSize * 0.5, 3);
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                    ctx.fillStyle = gaiaColors[obj.rt] || '#888';
+                    ctx.globalAlpha = 0.8;
+                    ctx.fill();
+                    ctx.globalAlpha = 1.0;
+                });
+                const texture = PIXI.Texture.fromCanvas(offscreen);
                 AgeVisState.pixi.bg = new PIXI.Sprite(texture);
                 AgeVisState.pixi.app.stage.addChildAt(AgeVisState.pixi.bg, 0); 
             },
@@ -437,7 +528,7 @@ result
                     const base = path[0];
                     const g = ep.gfx;
                     
-                    const isDead = path.deathTime && timeMs >= path.deathTime;
+                    const isDead = ep.deathTime && timeMs >= ep.deathTime;
                     
                     if (timeMs >= base.t && (base.p === 1 || base.p === 2)) {
                         const isBld = base.shape === 'square' || base.shape === 'building';
@@ -473,7 +564,7 @@ result
         };
 
         // ==========================================
-        // 7. UI & EVENT CONTROLLERS
+        // 8. UI & EVENT CONTROLLERS
         // ==========================================
         const UI = {
             bindDropzone: () => {
@@ -503,6 +594,29 @@ result
             initPlayback: () => {
                 const tl = document.getElementById('timeline');
                 tl.max = AgeVisState.rawPayload.duration; tl.disabled = false; tl.value = 0;
+                
+                // Age-up markers on timeline
+                const markerEl = document.getElementById('age-markers');
+                markerEl.innerHTML = '';
+                const AGE_COLORS = { Feudal: '#f39c12', Castle: '#e74c3c', Imperial: '#9b59b6' };
+                AgeVisState.rawPayload.commands.filter(c => c.type === 'age_up').forEach(ev => {
+                    const pct = (ev.t / AgeVisState.rawPayload.duration) * 100;
+                    const col = AGE_COLORS[ev.age] || '#fff';
+                    const pName = AgeVisState.rawPayload.players[(ev.p || 1) - 1]?.name || `P${ev.p}`;
+                    const m = document.createElement('div');
+                    m.className = 'age-marker';
+                    m.title = `${pName} → ${ev.age} Age`;
+                    m.style.cssText = `left:${pct}%;height:16px;background:${col};opacity:0.85;`;
+                    const lbl = document.createElement('span');
+                    lbl.className = 'age-marker-label';
+                    lbl.style.color = col;
+                    lbl.innerText = ev.age[0]; // F / C / I
+                    m.appendChild(lbl);
+                    markerEl.appendChild(m);
+                });
+
+                // Tooltip init
+                Tooltip.init();
                 
                 if (AgeVisState.rawPayload.players.length >= 2) {
                     [0, 1].forEach(i => {
@@ -569,12 +683,15 @@ result
                 if (document.getElementById('p1-card').style.display === 'block') {
                     document.getElementById('p1-pop').innerText = `${stats[1].pA} / ${stats[1].pT}`;
                     document.getElementById('p1-bld').innerText = `${stats[1].bA} / ${stats[1].bT}`;
+                    document.getElementById('p1-apm').innerText = APMCalc.get('1', timeMs);
                     document.getElementById('p2-pop').innerText = `${stats[2].pA} / ${stats[2].pT}`;
                     document.getElementById('p2-bld').innerText = `${stats[2].bA} / ${stats[2].bT}`;
+                    document.getElementById('p2-apm').innerText = APMCalc.get('2', timeMs);
                 }
             }
         };
 
+        // Bootstrap
         Core.boot();
     </script>
 </body>
