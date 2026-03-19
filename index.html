@@ -4,72 +4,111 @@
     <script src="https://pixijs.download/release/pixi.js"></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
     <style>
-        body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; }
-        #dropzone { width: 300px; height: 100vh; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; }
-        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; }
+        body { margin: 0; background: #1e1e1e; color: white; font-family: sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Layout Grid */
+        #sidebar { width: 350px; background: #2d2d2d; padding: 20px; border-right: 2px solid #444; display: flex; flex-direction: column; }
+        #main-view { flex-grow: 1; display: flex; flex-direction: column; }
+        #canvas-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; background: #111; }
+        
+        /* UI Elements */
+        #playback-bar { height: 60px; background: #222; border-top: 2px solid #444; display: flex; align-items: center; padding: 0 20px; gap: 15px; }
+        #timeline { flex-grow: 1; cursor: pointer; }
         .drag-over { background: #3d3d3d !important; border: 2px dashed #f39c12; }
+        
+        /* Data Readouts */
+        .stats-box { background: #1a1a1a; padding: 10px; margin-top: 10px; border-radius: 4px; font-size: 14px; }
+        .log { color: #2ecc71; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; overflow-y: auto; max-height: 200px;}
     </style>
 </head>
 <body>
-    <div id="dropzone">
-        <h2>Drag .aoe2record Here</h2>
-        <div id="status" style="color: #f39c12; margin-bottom: 10px;">Loading Python engine...</div>
-        <pre id="output" style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #2ecc71;"></pre>
+
+    <div id="sidebar">
+        <h2 style="margin-top:0; color: #f39c12;">AoE2 Visualizer</h2>
+        <div id="dropzone" style="padding: 20px; border: 2px dashed #666; text-align: center; margin-bottom: 20px;">
+            <span id="status">Loading Python...</span>
+        </div>
+        
+        <div class="stats-box" id="match-info">Match Info: Pending...</div>
+        <div class="stats-box log" id="output">System Log...</div>
     </div>
-    <div id="canvas-container"></div>
+
+    <div id="main-view">
+        <div id="canvas-container"></div>
+        
+        <div id="playback-bar">
+            <button id="btn-play">▶ Play</button>
+            <span id="time-display">00:00</span>
+            <input type="range" id="timeline" min="0" max="100" value="0" disabled>
+        </div>
+    </div>
 
     <script>
-        const app = new PIXI.Application({ width: 800, height: 600, backgroundColor: 0x1099bb });
+        // 1. Initialize Canvas Environment
+        const CANVAS_SIZE = 650;
+        const app = new PIXI.Application({ width: CANVAS_SIZE, height: CANVAS_SIZE, backgroundColor: 0x2a2a2a });
         document.getElementById('canvas-container').appendChild(app.view);
+        
+        const mapContainer = new PIXI.Container();
+        app.stage.addChild(mapContainer);
+
+        // Player Colors (AoE2 IDs map to Hex)
+        const aoeColors = { 1: 0x0000FF, 2: 0xFF0000, 3: 0x00FF00, 4: 0xFFFF00, 5: 0x00FFFF, 6: 0xFF00FF, 7: 0x808080, 8: 0xFFA500, null: 0xFFFFFF };
 
         let pyodideInstance;
+        let matchDurationMs = 0;
 
-        // 2. Initialize Python Runtime in the Browser
+        // 2. Boot Pyodide
         async function initPython() {
             pyodideInstance = await loadPyodide();
             await pyodideInstance.loadPackage("micropip");
-            const micropip = pyodideInstance.pyimport("micropip");
+            await pyodideInstance.pyimport("micropip").install("aoc-mgz");
             
-            // Install the aoc-mgz parser dynamically into the browser's RAM
-            await micropip.install("aoc-mgz");
-            document.getElementById('status').innerText = "System Ready. Drop file.";
-            document.getElementById('status').style.color = "#2ecc71";
+            const stat = document.getElementById('status');
+            stat.innerText = "Ready. Drop .aoe2record";
+            stat.style.color = "#2ecc71";
+            document.getElementById('dropzone').style.borderColor = "#2ecc71";
         }
         initPython();
 
-        // 3. Handle File & Parse Locally (No Server)
+        // 3. Drop & Parse Engine
         const dropzone = document.getElementById('dropzone');
-        const output = document.getElementById('output');
-
         dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
         dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
         dropzone.ondrop = async (e) => {
             e.preventDefault();
             dropzone.classList.remove('drag-over');
+            if (!pyodideInstance) return;
             
-            if (!pyodideInstance) { output.innerText = "Python engine still loading..."; return; }
-            
+            document.getElementById('output').innerText = "Parsing binary structure...";
             const file = e.dataTransfer.files[0];
-            output.innerText = "Parsing binary locally...";
-
-            // Read file as ArrayBuffer for Python
             const arrayBuffer = await file.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-            
-            // Write to Pyodide's virtual file system
-            pyodideInstance.FS.writeFile('/replay.aoe2record', uint8Array);
+            pyodideInstance.FS.writeFile('/replay.rec', new Uint8Array(arrayBuffer));
 
-            // 4. Execute Python code directly inside JS
+            // Python Extraction Payload (Expanded)
             const pyCode = `
 import json
 from mgz.summary import Summary
 
 try:
-    with open('/replay.aoe2record', 'rb') as f:
+    with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
+        
+        # Extract initial state objects (TCs, Villagers, Trees)
+        init_objs = []
+        for obj in summary.get_objects():
+            # Filter out some noise, keep basic entities
+            init_objs.append({
+                "p": obj.get("player_number"),
+                "x": obj.get("x"),
+                "y": obj.get("y")
+            })
+
         payload = {
             "duration": summary.get_duration(),
-            "players": [{"name": p['name'], "civ": p['civilization']} for p in summary.get_players()]
+            "map_size": summary.get_map()['size'],
+            "players": [{"name": p['name'], "civ": p['civilization'], "color": p['color_id']} for p in summary.get_players()],
+            "objects": init_objs
         }
     result = json.dumps({"status": "success", "data": payload})
 except Exception as e:
@@ -77,17 +116,64 @@ except Exception as e:
 result
             `;
 
-            const jsonResponse = pyodideInstance.runPython(pyCode);
-            const parsedData = JSON.parse(jsonResponse);
+            const parsedData = JSON.parse(pyodideInstance.runPython(pyCode));
             
-            output.innerText = JSON.stringify(parsedData, null, 2);
-
             if (parsedData.status === "success") {
-                const square = new PIXI.Graphics();
-                square.beginFill(0xf39c12).drawRect(Math.random()*700, Math.random()*500, 50, 50).endFill();
-                app.stage.addChild(square);
+                document.getElementById('output').innerText = "Parse Complete.\nObjects loaded: " + parsedData.data.objects.length;
+                initMatchUI(parsedData.data);
+            } else {
+                document.getElementById('output').innerText = "Error: " + parsedData.message;
             }
         };
+
+        // 4. Render Logic & State Management
+        function initMatchUI(data) {
+            // Update Sidebar
+            const p1 = data.players[0] || {name: "P1", civ: "Unknown"};
+            const p2 = data.players[1] || {name: "P2", civ: "Unknown"};
+            document.getElementById('match-info').innerHTML = `
+                <strong>${p1.name}</strong> (${p1.civ})<br>
+                <div style="text-align:center; margin: 5px 0;">VS</div>
+                <strong>${p2.name}</strong> (${p2.civ})<br>
+                <hr style="border: 1px solid #444; margin: 10px 0;">
+                Map Size: ${data.map_size}x${data.map_size}
+            `;
+
+            // Configure Scrubber
+            matchDurationMs = data.duration;
+            const timeline = document.getElementById('timeline');
+            timeline.max = matchDurationMs;
+            timeline.disabled = false;
+
+            // Draw Initial Map State
+            mapContainer.removeChildren(); // Clear previous
+            
+            // Calculate scale: Canvas pixels per AoE2 tile
+            const scale = CANVAS_SIZE / data.map_size; 
+
+            // Draw map background bounds
+            const bg = new PIXI.Graphics();
+            bg.beginFill(0x334433).drawRect(0, 0, CANVAS_SIZE, CANVAS_SIZE).endFill();
+            mapContainer.addChild(bg);
+
+            // Draw all initial objects (Gaia & Players)
+            data.objects.forEach(obj => {
+                if(obj.x === undefined || obj.y === undefined) return;
+                
+                const dot = new PIXI.Graphics();
+                const color = aoeColors[obj.p] || 0x666666; // Default to grey for Gaia/Trees
+                
+                // Map AoE coordinates to Canvas coordinates
+                const canvasX = obj.x * scale;
+                const canvasY = CANVAS_SIZE - (obj.y * scale); // Invert Y axis for canvas drawing
+                
+                // Make player objects slightly larger than Gaia objects
+                const size = obj.p ? 3 : 1; 
+                
+                dot.beginFill(color).drawCircle(canvasX, canvasY, size).endFill();
+                mapContainer.addChild(dot);
+            });
+        }
     </script>
 </body>
 </html>
