@@ -139,17 +139,21 @@
             }
         };
 
-        // ==========================================
+// ==========================================
         // 4. PYTHON INTEROP & PARSER
         // ==========================================
         const Parser = {
             PY_DEPENDENCY_INJECTOR: `
 import json, tarfile, io, sys, sysconfig
 from pyodide.http import pyfetch
+import micropip
+
 async def install_tarball(pkg_name, version=""):
     api_url = f"https://pypi.org/pypi/{pkg_name}/{version}/json" if version else f"https://pypi.org/pypi/{pkg_name}/json"
     res = await pyfetch(api_url)
     data = await res.json()
+    if "urls" not in data:
+        raise ValueError(f"Package {pkg_name} not found. Response: {data}")
     tar_url = next(u["url"] for u in data["urls"] if u["url"].endswith(".tar.gz"))
     tar_res = await pyfetch(tar_url)
     tar = tarfile.open(fileobj=io.BytesIO(await tar_res.bytes()), mode="r:gz")
@@ -157,9 +161,10 @@ async def install_tarball(pkg_name, version=""):
     tar.extractall(site_pkgs)
     sys.path.append(f"{site_pkgs}/{data['info']['name']}-{data['info']['version']}")
 
+# Pre-install DE decompression tool, then extract mgz stack
+await micropip.install(["zstandard"])
 await install_tarball("construct", "2.10.67")
-await install_tarball("aocx")
-await install_tarball("aoc-mgz")
+await install_tarball("mgz")
             `,
             
             PY_EXTRACTOR: `
@@ -168,12 +173,15 @@ from mgz.summary import Summary
 try:
     with open('/replay.rec', 'rb') as f:
         summary = Summary(f)
-        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")} for o in summary.get_objects() if o.get("instance_id") is not None]
+        
+        # VRAM FIX: Filter out 15,000+ Gaia Trees and Mines. Only keep active player entities.
+        init_objs = [{"id": o.get("instance_id"), "p": o.get("player_number"), "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_type")} for o in summary.get_objects() if o.get("instance_id") is not None and o.get("player_number") in [1, 2, 3, 4, 5, 6, 7, 8]]
         
         commands = []
         for cmd in summary.get_commands():
             if cmd['type'] in ['move', 'build'] and 'position' in cmd and 'object_ids' in cmd:
-                commands.append({"t": cmd['timestamp'], "type": "move", "ids": cmd['object_ids'], "x": cmd['position'][0], "y": cmd['position'][1]})
+                # Appended player_id to commands for Dynamic Discovery
+                commands.append({"t": cmd['timestamp'], "type": "move", "ids": cmd['object_ids'], "x": cmd['position'][0], "y": cmd['position'][1], "p": cmd.get('player_id')})
             elif cmd['type'] == 'delete' and 'object_ids' in cmd:
                 commands.append({"t": cmd['timestamp'], "type": "delete", "ids": cmd['object_ids']})
             elif cmd['type'] == 'resign':
@@ -245,13 +253,13 @@ result
 
         const Simulation = {
             compilePaths: () => {
-                // Garbage Collection
                 Object.values(AgeVisState.paths).forEach(ep => { if (ep.gfx) ep.gfx.destroy(); });
                 AgeVisState.paths = {};
                 AgeVisState.mapScale = Config.CANVAS_SIZE / AgeVisState.rawPayload.map_size;
 
                 const fallbackStat = { render_shape: "circle", speed: 1.1, size: 2 };
 
+                // Register starting units
                 AgeVisState.rawPayload.objects.forEach(obj => {
                     if (obj.x === undefined || obj.y === undefined) return;
                     const stats = AgeVisState.aoeData[obj.type_id] || fallbackStat;
@@ -278,7 +286,17 @@ result
                     }
 
                     cmd.ids.forEach(unitId => {
-                        if (!AgeVisState.paths[unitId]) return;
+                        // FEATURE: Dynamic Entity Discovery (Spawn mid-game army production)
+                        if (!AgeVisState.paths[unitId]) {
+                            const g = new PIXI.Graphics();
+                            AgeVisState.pixi.container.addChild(g);
+                            AgeVisState.paths[unitId] = {
+                                path: [{ t: cmd.t, x: cmd.x, y: cmd.y, p: cmd.p || null, speed: 1.1, shape: 'circle', size: 2 }],
+                                gfx: g,
+                                drawn: false
+                            };
+                        }
+
                         const path = AgeVisState.paths[unitId].path;
                         let lastNode = path[path.length - 1];
 
@@ -324,7 +342,6 @@ result
                 });
             }
         };
-
         // ==========================================
         // 6. PIXIJS RENDERER
         // ==========================================
