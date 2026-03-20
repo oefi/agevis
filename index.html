@@ -366,6 +366,7 @@ async def install_tarball(pkg_name, version=""):
     sys.path.append(f"{site}/{meta['info']['name']}-{meta['info']['version']}")
 
 await install_tarball("construct", "2.10.67")
+await install_tarball("aocref")
 await install_tarball("mgz")
 
 # construct 2.10.67 is Python 3.12 compatible but removed Embedded.
@@ -485,11 +486,18 @@ import sys as _sys
 import mgz.fast.header as _mfh
 import inspect as _inspect
 
-_src    = _inspect.getsource(_mfh.parse_de)
+_src    = _inspect.getsource(_mfh.parse_de).replace(chr(13)+chr(10), chr(10)).replace(chr(13), chr(10))
 _needle = "range(custom_civ_count)"
 _fix    = "range(min(1, custom_civ_count) if save >= 67.0 else custom_civ_count)"
+# Trailing +8 bytes needle — using chr(10) not backslash-n (avoids JS template literal splitting)
+_nl = chr(10)
+_return_needle = "    return dict(" + _nl + "        players="
 if _src.count(_needle) == 1:
     _patched = _src.replace(_needle, _fix, 1)
+    _patched = _patched.replace(
+        "    return dict(" + _nl + "        players=",
+        "    if save >= 67.0: data.read(8)" + _nl + "    return dict(" + _nl + "        players=",
+        1)
     _ns = {}
     _ns.update(vars(_mfh))
     _ns["__name__"] = _mfh.__name__
@@ -549,7 +557,7 @@ print("[AgeVis-py] string_block patched for save >= 67.x", file=_sys.stderr)
 #        is not in consts['player_colors'] (keys '0'-'7').
 import mgz.model as _mm
 import inspect as _inspect_mm
-_mm_src = _inspect_mm.getsource(_mm.parse_match)
+_mm_src = _inspect_mm.getsource(_mm.parse_match).replace(chr(13)+chr(10), chr(10)).replace(chr(13), chr(10))
 _mm_src = _mm_src.replace(
     "        if de_player:",
     "        if de_player and 0 <= de_player.get('color_id', -1) <= 7:",
