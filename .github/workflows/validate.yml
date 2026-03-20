@@ -1,0 +1,27 @@
+name: validate
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JS syntax check
+        run: |
+          node -e "
+            const fs = require('fs');
+            const html = fs.readFileSync('index.html', 'utf8');
+            const m = html.match(/<script>([\s\S]*?)<\/script>/);
+            if (!m) { console.error('No script block found'); process.exit(1); }
+            try { new Function(m[1]); console.log('JS syntax OK'); }
+            catch(e) { console.error('JS SYNTAX ERROR:', e.message); process.exit(1); }
+          "
+      - name: Null byte check
+        run: |
+          python3 -c "
+          c = open('index.html').read()
+          n = c.count(chr(0))
+          if n: print(f'FAIL: {n} null bytes'); exit(1)
+          print('No null bytes OK')
+          "
