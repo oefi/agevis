@@ -4,7 +4,7 @@
 
 Drop a `.aoe2record` file onto the page and watch unit paths, terrain, resources, age-up events, and live APM animate in real time.
 
-![AgeVis screenshot showing two player paths on Arabia with age markers on the timeline](.github/screenshot.png)
+<img width="780" height="654" alt="2026-03-20 14_01_54-AgeVis — AoE2 Replay Visualizer — Mozilla Firefox" src="https://github.com/user-attachments/assets/1c15d5a1-dfe5-4512-b090-2f43217f3592" />
 
 ---
 
