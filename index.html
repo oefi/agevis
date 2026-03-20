@@ -105,6 +105,7 @@
         <span id="log-count">0 events</span>
         <button class="log-btn" id="btn-copy">Copy</button>
         <button class="log-btn" onclick="Logger.clear()">Clear</button>
+        <button class="log-btn" id="btn-reset-cache" title="Delete Pyodide IndexedDB cache and reload. Use if engine fails to boot after a browser update.">↺ Cache</button>
     </div>
     <div id="log"></div>
 </div>
@@ -215,6 +216,48 @@ const Logger = (() => {
 })();
 document.getElementById('btn-copy').addEventListener('click', () => Logger.copyToClipboard());
 
+document.getElementById('btn-reset-cache').addEventListener('click', (() => {
+    let armed = false, countdown = 0, ticker = null;
+    function disarm() {
+        armed = false; countdown = 0;
+        clearInterval(ticker); ticker = null;
+        const btn = document.getElementById('btn-reset-cache');
+        btn.innerText   = '↺ Cache';
+        btn.style.color = '';
+    }
+    return async function() {
+        const btn = document.getElementById('btn-reset-cache');
+        if (!armed) {
+            armed = true; countdown = 5;
+            btn.innerText   = `↺ Sure? (${countdown}s)`;
+            btn.style.color = '#f39c12';
+            ticker = setInterval(() => {
+                countdown--;
+                if (countdown <= 0) { disarm(); return; }
+                btn.innerText = `↺ Sure? (${countdown}s)`;
+            }, 1000);
+            return;
+        }
+        disarm();
+        btn.innerText   = 'Clearing…';
+        btn.style.color = '#e74c3c';
+        try {
+            const dbs = await indexedDB.databases();
+            await Promise.all(dbs.map(db => new Promise((res, rej) => {
+                const req = indexedDB.deleteDatabase(db.name);
+                req.onsuccess = res; req.onerror = rej; req.onblocked = res;
+            })));
+        } catch (_) {
+            // Firefox may not support indexedDB.databases() — fall back to known Pyodide DB name
+            await new Promise((res, rej) => {
+                const req = indexedDB.deleteDatabase('pyodide');
+                req.onsuccess = res; req.onerror = rej; req.onblocked = res;
+            });
+        }
+        location.reload();
+    };
+})());
+
 // ============================================================
 // 3. ENGINE BOOT
 // ============================================================
@@ -248,10 +291,12 @@ const Core = {
             const raw = await res.json();
 
             // aoe2techtree structure can vary — probe all known paths
-            const topKeys = Object.keys(raw).slice(0, 8);
+            const topKeys  = Object.keys(raw).slice(0, 8);
+            const dataKeys = Object.keys(raw.data  || {}).slice(0, 12);
             Logger.log(`data.json top-level keys: [${topKeys.join(', ')}]`);
-            const uData = raw.data?.units    ?? raw.units    ?? raw.data?.Units    ?? {};
-            const bData = raw.data?.buildings ?? raw.buildings ?? raw.data?.Buildings ?? {};
+            Logger.log(`data.json raw.data keys:  [${dataKeys.join(', ')}]`);
+            const uData = raw.data?.Unit     ?? raw.data?.units    ?? raw.units    ?? {};
+            const bData = raw.data?.Building  ?? raw.data?.buildings ?? raw.buildings ?? {};
             Logger.log(`Unit entries: ${Object.keys(uData).length}, Building entries: ${Object.keys(bData).length}`);
 
             Object.values(uData).forEach(u => { AgeVisState.aoeData[u.ID ?? u.id] = { ...u, render_shape: 'circle', size: 2 }; });
@@ -262,8 +307,22 @@ const Core = {
 
             Logger.log('Initializing Pyodide WASM runtime…');
             AgeVisState.pyodide = await loadPyodide();
-            // FIX: zstandard is a C extension — loadPackage() not micropip.install()
-            await AgeVisState.pyodide.loadPackage(['micropip', 'zstandard']);
+            // zstandard bundled in Pyodide ≥0.26. Older cached builds may not have it.
+            // Fallback chain: loadPackage → micropip → warn and continue.
+            // mgz only needs zstandard for zstd-compressed DE replays; most replays use zlib.
+            // hashlib is unvendored from the stdlib in Pyodide 0.27.0+ — mgz.model imports it.
+            await AgeVisState.pyodide.loadPackage(['micropip', 'hashlib']);
+            try {
+                await AgeVisState.pyodide.loadPackage(['zstandard']);
+                Logger.log('zstandard loaded.', 'success');
+            } catch (_) {
+                try {
+                    await AgeVisState.pyodide.runPythonAsync("import micropip; await micropip.install('zstandard')");
+                    Logger.log('zstandard loaded via micropip.', 'success');
+                } catch (__) {
+                    Logger.log('zstandard unavailable — zstd-compressed replays will fail. Clear browser cache to force Pyodide 0.27.', 'warning');
+                }
+            }
             await AgeVisState.pyodide.runPythonAsync(Parser.PY_BOOT);
 
             Logger.status('Ready — drop or select a replay', '#2ecc71');
@@ -273,6 +332,7 @@ const Core = {
             document.getElementById('btn-browse').style.display = 'inline-block';
             Logger.log('Engine ready.', 'success');
             UI.bindDropzone();
+            UI.bindKeys();
         } catch (err) {
             Logger.status('Engine boot failed', '#e74c3c');
             Logger.log(`Boot error: ${err.message}`, 'error', err);
@@ -302,46 +362,308 @@ async def install_tarball(pkg_name, version=""):
     tar  = tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz")
     site = sysconfig.get_paths()["purelib"]
     # filter="data" suppresses Python 3.12 DeprecationWarning and is the safe default
-    tar.extractall(site, filter="data")
+    tar.extractall(site, **({'filter': 'data'} if sys.version_info >= (3, 12) else {}))
     sys.path.append(f"{site}/{meta['info']['name']}-{meta['info']['version']}")
 
-await install_tarball("construct", "2.8.22")
+await install_tarball("construct", "2.10.67")
 await install_tarball("mgz")
+
+# construct 2.10.67 is Python 3.12 compatible but removed Embedded.
+# mgz 1.8.51 still imports Embedded from construct at module level.
+# Inject a shim BEFORE mgz is ever imported so the import succeeds.
+#
+# Embedded in 2.8.x set flagembedded=True on a Subconstruct, which caused
+# Struct._parse to merge fields into the parent context. construct 2.10.67
+# removed the entire flagembedded mechanism.
+#
+# For DE replays, mgz uses the fast header parser (struct-based, no construct
+# Struct evaluation), so the shim only needs to survive import — it will not
+# be called at parse time on DE files. For HD/UP replays it will be called;
+# the passthrough behaviour is best-effort but prevents crashing.
+import construct, construct.core
+
+class _Embedded(construct.Subconstruct):
+    r"""Shim for construct 2.8.x Embedded — merges subcon fields into parent."""
+    def __init__(self, subcon):
+        super().__init__(subcon)
+    def _parse(self, stream, context, path):
+        obj = self.subcon._parsereport(stream, context, path)
+        # Attempt the merge that the original Embedded performed
+        if hasattr(obj, "items"):
+            for k, v in obj.items():
+                if not k.startswith("_"):
+                    context[k] = v
+        return obj
+    def _build(self, obj, stream, context, path):
+        return self.subcon._build(obj, stream, context, path)
+    def _sizeof(self, context, path):
+        return self.subcon._sizeof(context, path)
+
+construct.Embedded = _Embedded
+construct.core.Embedded = _Embedded
+
+# construct 2.8.x: String(length, encoding=None, padchar=bytes([0]), paddir, trimdir)
+# construct 2.10.67: removed; nearest equivalent is PaddedString(length, encoding)
+# but encoding is required there and it doesn't accept padchar/paddir/trimdir.
+# Build the shim from 2.10.67 primitives that ARE available.
+def _String(length, encoding=None, padchar=None, paddir="right", trimdir="right"):
+    pad = padchar[:1] if padchar else bytes([0])
+    inner = construct.core.FixedSized(length, construct.core.NullStripped(construct.core.GreedyBytes, pad=pad))
+    if encoding:
+        return construct.core.StringEncoded(inner, encoding)
+    return inner
+
+construct.String      = _String
+construct.core.String = _String
+
+# ── Python 3.12 / construct 2.10.67 shim: Enum.__init__ ────────────────────
+# mgz/enums.py calls Enum(subcon, self=1, ally=2, ...) — "self" is a valid
+# AoE2 diplomacy stance name. Python 3.12 tightened keyword-argument handling:
+# passing self=<val> now always conflicts with the implicit first positional
+# parameter named "self". Fix: replace __init__ with one whose first param is
+# named _self, so self=1 lands in **mapping without conflict.
+from construct.core import EnumIntegerString as _EIS
+def _enum_init(_self, subcon, *merge, **mapping):
+    construct.core.Subconstruct.__init__(_self, subcon)
+    for enum in merge:
+        for enumentry in enum:
+            mapping[enumentry.name] = enumentry.value
+    _self.encmapping = {_EIS.new(v, k): v for k, v in mapping.items()}
+    _self.decmapping = {v: _EIS.new(v, k) for k, v in mapping.items()}
+    _self.ksymapping = {v: k for k, v in mapping.items()}
+construct.core.Enum.__init__ = _enum_init
+construct.Enum.__init__      = _enum_init
+
+# ── Python 3.12 / construct 2.10.67 shim: PascalString ────────────────────
+# construct 2.10.67 made encoding a required arg; mgz calls PascalString(lf)
+# without encoding. Default to utf8 (matches prior behaviour).
+from construct.core import StringEncoded as _SE, Prefixed as _Pref, GreedyBytes as _GB
+def _PascalString(lengthfield=None, encoding="utf8", **kw):
+    if lengthfield is None:
+        lengthfield = kw.get("lengthfield")
+    return _SE(_Pref(lengthfield, _GB), encoding)
+construct.PascalString      = _PascalString
+construct.core.PascalString = _PascalString
+
+# ── Python 3.12 / construct 2.10.67 shim: CString encoding map ─────────────
+# construct 2.10.67's encodingunit() only accepts ascii/utf8/utf16/utf32 family.
+# mgz calls CString(encoding='latin1'); map it to ascii (both single-byte,
+# latin1 is a superset but the null-terminator scan is identical).
+_origCString = construct.core.CString
+def _CString(encoding="utf8", **kw):
+    _map = {"latin1": "ascii", "latin-1": "ascii", "iso-8859-1": "ascii"}
+    return _origCString(_map.get(encoding, encoding))
+construct.CString      = _CString
+construct.core.CString = _CString
+
+# ── construct 2.10.67 shim: _read_stream ───────────────────────────────────
+# mgz/util.py MgzPrefixed._parse calls construct.core._read_stream(stream, n).
+# Removed in 2.10.67; replaced by stream_read(stream, length, path).
+construct.core._read_stream = lambda stream, length: construct.core.stream_read(stream, length, "(shim)")
+
+# ── construct 2.10.67 shim: mgz.util _decode signatures ────────────────────
+# construct 2.10.67 added a required "path" arg to Tunnel._decode and
+# Adapter._decode. All five mgz.util subclasses still have the old 2-arg
+# (self, data, context) signature. Wrap each to accept and ignore path.
+import mgz.util as _mu
+def _wrap_decode(fn):
+    def _d(self, data, context, path=None): return fn(self, data, context)
+    return _d
+for _cls in (_mu.ZlibCompressed, _mu.TimeSecAdapter, _mu.BoolAdapter,
+             _mu.VersionAdapter, _mu.ModVersionAdapter):
+    _cls._decode = _wrap_decode(_cls._decode)
+
+# ── save >= 67.x: fix civ_selection over-consumption ──────────────────────
+# Binary analysis of save_version=67.20:
+# At save >= 67.x the player-slot layout adds field_A (available-civ count)
+# before field_B (selected civ, always 1 entry when field_A > 0).
+# mgz reads civ_count=field_A then loops that many times, which over-reads
+# when field_A > 1 (e.g. field_A=24 for the second human player).
+# Fix: clamp the loop to at most 1 iteration on save >= 67.x.
+# Single-expression replacement — no literal newlines in strings needed.
+import sys as _sys
+import mgz.fast.header as _mfh
+import inspect as _inspect
+
+_src    = _inspect.getsource(_mfh.parse_de)
+_needle = "range(custom_civ_count)"
+_fix    = "range(min(1, custom_civ_count) if save >= 67.0 else custom_civ_count)"
+if _src.count(_needle) == 1:
+    _patched = _src.replace(_needle, _fix, 1)
+    _ns = {}
+    _ns.update(vars(_mfh))
+    _ns["__name__"] = _mfh.__name__
+    exec(compile(_patched, "parse_de_patched_67x", "exec"), _ns)
+    _mfh.parse_de = _ns["parse_de"]
+    print("[AgeVis-py] parse_de patched for save >= 67.x", file=_sys.stderr)
+else:
+    print("[AgeVis-py] WARNING: parse_de needle not found", file=_sys.stderr)
+
+# ── save >= 67.x: string_block crc uint32 → uint64 ─────────────────────────
+# Binary analysis: string_block reads crc(4B) then de_string. At save 67.x
+# the crc field grew to 8 bytes (uint64). The extra 4 bytes are always zero.
+# Adaptive fix: after reading crc(4B), if crc==0 and next 2 bytes are NOT
+# 0x600A, consume 4 more bytes. Works for all save versions without needing
+# the save parameter in scope.
+import struct as _struct_sb
+
+def _string_block_patched(data):
+    strings = []
+    while True:
+        pos = data.tell()
+        b4 = data.read(4)
+        if len(b4) < 4:
+            break
+        crc = _struct_sb.unpack("<I", b4)[0]
+        if 0 < crc < 255:
+            break
+        if crc == 0:
+            peek = data.read(2)
+            if peek != b"\\x60\\x0a":
+                data.read(2)
+            else:
+                data.seek(data.tell() - 2)
+        ds_pos = data.tell()
+        magic = data.read(2)
+        if magic != b"\\x60\\x0a":
+            data.seek(pos)
+            break
+        length = _struct_sb.unpack("<h", data.read(2))[0]
+        strings.append(data.read(length).decode("utf-8").split(":"))
+    return strings
+
+_mfh.string_block = _string_block_patched
+# Also inject into _ns so the exec'd parse_de finds it when it calls string_block
+if "_ns" in dir():
+    _ns["string_block"] = _string_block_patched
+print("[AgeVis-py] string_block patched for save >= 67.x", file=_sys.stderr)
+
+# ── save >= 67.x: parse_match color_id protection ─────────────────────────
+# Two issues at save 67.x:
+# 1. de_player (from parse_de 8-slot loop) has color_id=15 for the second human
+#    player due to an unresolved slot layout shift. player.update(de_player) would
+#    overwrite the parse_players color_id with 15.
+# 2. parse_players also returns wrong color_ids for save 67.x (object section changed).
+# Fix A: skip de_player.update when de_player color_id is out of valid range (0-7).
+# Fix B: safe fallback in the Player() construction using player_number when color_id
+#        is not in consts['player_colors'] (keys '0'-'7').
+import mgz.model as _mm
+import inspect as _inspect_mm
+_mm_src = _inspect_mm.getsource(_mm.parse_match)
+_mm_src = _mm_src.replace(
+    "        if de_player:",
+    "        if de_player and 0 <= de_player.get('color_id', -1) <= 7:",
+    1
+)
+_mm_src = _mm_src.replace(
+    "consts['player_colors'][str(player['color_id'])]",
+    "consts['player_colors'].get(str(player['color_id']), consts['player_colors'][str((player['number']-1)%8)])",
+    1
+)
+_mm_src = _mm_src.replace(
+    "dataset['civilizations'][str(player['civilization_id'])]['name']",
+    "dataset['civilizations'].get(str(player['civilization_id']), {}).get('name', str(player['civilization_id']))",
+    1
+)
+if _mm_src.count("(player['number']-1)%8") == 1:
+    _mm_ns = {}
+    _mm_ns.update(vars(_mm))
+    _mm_ns["__name__"] = _mm.__name__
+    exec(compile(_mm_src, "parse_match_patched_67x", "exec"), _mm_ns)
+    _mm.parse_match = _mm_ns["parse_match"]
+    print("[AgeVis-py] parse_match patched for save >= 67.x", file=_sys.stderr)
+else:
+    print("[AgeVis-py] WARNING: parse_match patch failed", file=_sys.stderr)
     `,
 
     // Single-pass extractor — written against mgz 1.8.51 / ModelSummary API.
     //
     // Key API facts discovered from source inspection:
-    //  • get_objects() → dict {"objects":[...], "tcs":...} — NOT a bare list
-    //  • object type field is "object_id", NOT "object_type"
-    //  • gaia player_number is None, NOT 0
-    //  • get_map()["size"] is a string ("Large") — use ["dimension"] for the int
-    //  • tile terrain field is "terrain_id", NOT "terrain_type"
-    //  • get_commands() does not exist — use match.actions (Action dataclasses)
-    //  • action.timestamp is timedelta — call .total_seconds()*1000 for ms
-    //  • coordinates are in action.position (moved by enrich_action), not payload
-    //  • age-ups are in match.uptimes (Uptime dataclasses), not RESEARCH actions
-    //  • get_players() returns civilization as int (ID) — use match.players for name
+    // API notes (mgz 1.8.51) — two distinct code paths depending on replay version:
+    //
+    // ModelSummary (DE replays, save_version > 13.34):
+    //   s.match.actions  — list of Action dataclasses
+    //     .timestamp     — timedelta  → .total_seconds()*1000 for ms
+    //     .type          — ActionEnum
+    //     .player        — Player dataclass or None  → .number for pid
+    //     .position      — Position or None  → .x/.y (enrich_action moved coords here)
+    //     .payload       — dict  → object_ids still here
+    //   s.match.uptimes  — list of Uptime dataclasses for age-ups
+    //     .timestamp     — timedelta
+    //     .age           — Age enum  → .name e.g. "FEUDAL_AGE"
+    //     .player        — Player dataclass
+    //   s.match.players  — civ as string name  (get_players() gives int ID)
+    //
+    // FullSummary (HD/UP/older replays):
+    //   s._actions       — list of (duration_ms:int, ActionEnum, payload_dict)
+    //     payload_dict   — raw fast-parse output; x/y coords ARE in dict directly
+    //     player_id      — in payload_dict["player_id"]
+    //   s.get_chat()     — list of dicts; filter type==Chat.AGE for age-ups
+    //     chat["age"]    — Age enum  → .name e.g. "FEUDAL_AGE"
+    //     chat["player_number"], chat["timestamp"] (ms int)
+    //   s.get_players()  — civ as int (civilization ID, not name)
+    //
+    // Both paths share:
+    //   get_objects()    — returns dict {"objects":[...], "tcs":...}, NOT a bare list
+    //   object type field is "object_id" (not "object_type")
+    //   gaia player_number is None (not 0)
+    //   get_map()["dimension"] for tile count int; ["size"] is a string ("Large")
+    //   tile terrain field is "terrain_id" (not "terrain_type")
     PY_EXTRACT: `
 import json, traceback
 from mgz.summary import Summary
 from mgz.fast import Action as ActionEnum
+from mgz.common.chat import Chat as ChatType
 
 PLAYER_IDS   = {1, 2, 3, 4, 5, 6, 7, 8}
 RESOURCE_IDS = {66: "gold", 102: "stone", 285: "relic"}
 AGE_MAP      = {"FEUDAL_AGE": "Feudal", "CASTLE_AGE": "Castle", "IMPERIAL_AGE": "Imperial"}
-# All action types that produce meaningful unit displacement
+# Action types that carry destination coordinates + object_ids in both paths
 MOVE_TYPES   = {ActionEnum.MOVE, ActionEnum.ORDER, ActionEnum.PATROL, ActionEnum.DE_ATTACK_MOVE}
+MOVE_OR_BUILD = MOVE_TYPES | {ActionEnum.BUILD}
 
 try:
-    with open("/replay.rec", "rb") as f:
-        s = Summary(f)
+    # Probe save_version before attempting full parse so we can log it.
+    # decompress + parse_version are the same calls Summary() makes internally.
+    import struct as _struct, zlib as _zlib
+    from mgz.fast.header import decompress as _decompress, parse_version as _pv
+    from mgz.model.compat import ModelSummary
+    from mgz.summary.full import FullSummary
+    from mgz.util import Version as _Version
 
-    # get_objects() returns dict {"objects":[...], "tcs":...}, NOT a bare list
+    with open("/replay.rec", "rb") as _f:
+        _raw = _f.read()
+    _buf = __import__("io").BytesIO(_raw)
+    try:
+        _hdr = _decompress(_buf)
+        _ver, _gver, _save, _log = _pv(_hdr, _buf)
+        _save_str = f"{_save:.2f}"
+        _is_de = (_ver is _Version.DE and _save > 13.34)
+    except Exception as _e:
+        _save_str = "unknown"
+        _is_de = False
+
+    # Log the version so parse failures are diagnosable.
+    print(f"[AgeVis-py] save_version={_save_str}, is_de={_is_de}")
+
+    _buf.seek(0)
+    if _is_de:
+        # Bypass Summary() fallback — it swallows the real ModelSummary error
+        # into Python's logging module where we can't see it. Call directly.
+        try:
+            s = ModelSummary(_buf)
+        except RuntimeError as _e:
+            raise RuntimeError(f"DE fast-parse failed (save={_save_str}): {_e}")
+    else:
+        s = FullSummary(_buf)
+
+    is_model = hasattr(s, "match")  # True → ModelSummary, False → FullSummary
+
+    # ── Objects ─────────────────────────────────────────────────────────────
+    # get_objects() → dict {"objects":[...], "tcs":...} on BOTH paths
     obj_wrap = s.get_objects()
     all_objs = obj_wrap.get("objects", []) if isinstance(obj_wrap, dict) else list(obj_wrap)
 
-    # Type field is "object_id"; gaia has player_number=None (not 0)
     init_objs = [
         {"id": o.get("instance_id"), "p": o.get("player_number"),
          "x": o.get("x"), "y": o.get("y"), "type_id": o.get("object_id")}
@@ -351,47 +673,49 @@ try:
     gaia = [
         {"x": o.get("x"), "y": o.get("y"), "rt": RESOURCE_IDS[o.get("object_id")]}
         for o in all_objs
-        if o.get("player_number") is None
+        if o.get("player_number") is None          # gaia is None, NOT 0
         and o.get("object_id") in RESOURCE_IDS
         and o.get("x") is not None
     ]
 
-    # map_data["size"] is a string ("Large"); use "dimension" for the tile count
+    # ── Map ──────────────────────────────────────────────────────────────────
+    # get_map()["size"] is a string ("Large"); use ["dimension"] for the int
     map_data = s.get_map()
     dim = map_data.get("dimension") or map_data.get("size")
     if isinstance(dim, str):
         SIZE_LUT = {"Tiny":72,"Small":96,"Medium":120,"Normal":120,
                     "Large":144,"Giant":168,"Ludikris":200}
         dim = SIZE_LUT.get(dim, 120)
-    # tile terrain field is "terrain_id", not "terrain_type"
+    # tile terrain field is "terrain_id" on both paths
     tiles = [
         [t.get("terrain_id") or t.get("terrain_type", 0), t.get("elevation", 0)]
         for t in map_data.get("tiles", [])
     ]
 
-    # Players — use match.players directly for the civilization string name.
-    # get_players() returns civilization as an int (the ID), not the name string.
+    # ── Players ──────────────────────────────────────────────────────────────
     players = []
-    if hasattr(s, "match"):
+    if is_model:
+        # ModelSummary: match.players has civ as string name
         for p in sorted(s.match.players, key=lambda x: x.number):
             players.append({"name": p.name,
                             "civ":  p.civilization or str(p.civilization_id),
                             "color": p.color_id})
     else:
+        # FullSummary: get_players() returns civilization as int (the ID)
         for p in s.get_players():
             civ = p.get("civilization")
             players.append({"name": p["name"],
                             "civ":  civ if isinstance(civ, str) else str(civ or "?"),
                             "color": p["color_id"]})
 
+    # ── Commands & APM ───────────────────────────────────────────────────────
     commands = []
     apm_ts   = {"1": [], "2": []}
 
-    if hasattr(s, "match"):
-        # ModelSummary path (DE replays). Action is a dataclass:
-        #   timestamp: timedelta, type: ActionEnum,
-        #   payload: dict, player: Player|None, position: Position|None
-        # enrich_action() moves x/y from payload into action.position.
+    if is_model:
+        # ── ModelSummary (DE) ────────────────────────────────────────────────
+        # Actions are dataclasses: timestamp=timedelta, player=Player|None,
+        # position=Position|None (coords moved here by enrich_action), payload=dict
         for action in s.match.actions:
             ts  = int(action.timestamp.total_seconds() * 1000)
             pid = action.player.number if action.player else None
@@ -399,10 +723,7 @@ try:
                 apm_ts[str(pid)].append(ts)
 
             ids = action.payload.get("object_ids")
-            if action.type in MOVE_TYPES and action.position and ids:
-                commands.append({"t": ts, "type": "move", "ids": ids,
-                                 "x": action.position.x, "y": action.position.y, "p": pid})
-            elif action.type is ActionEnum.BUILD and action.position and ids:
+            if action.type in MOVE_OR_BUILD and action.position and ids:
                 commands.append({"t": ts, "type": "move", "ids": ids,
                                  "x": action.position.x, "y": action.position.y, "p": pid})
             elif action.type is ActionEnum.DELETE and ids:
@@ -410,12 +731,43 @@ try:
             elif action.type is ActionEnum.RESIGN and pid:
                 commands.append({"t": ts, "type": "resign", "p": pid})
 
-        # Age-ups via Uptime dataclasses (chat-based, more reliable than RESEARCH).
-        # Uptime fields: timestamp: timedelta, age: AgeEnum, player: Player
+        # Age-ups: Uptime dataclasses (timestamp=timedelta, age=AgeEnum, player=Player)
         for uptime in s.match.uptimes:
-            ts   = int(uptime.timestamp.total_seconds() * 1000)
-            pid  = uptime.player.number if uptime.player else None
+            ts    = int(uptime.timestamp.total_seconds() * 1000)
+            pid   = uptime.player.number if uptime.player else None
             aname = AGE_MAP.get(uptime.age.name if uptime.age else "", "")
+            if pid and aname:
+                commands.append({"t": ts, "type": "age_up", "p": pid, "age": aname})
+
+    else:
+        # ── FullSummary (HD/UP/older) ────────────────────────────────────────
+        # s._actions is a list of (duration_ms:int, ActionEnum, payload_dict)
+        # Coordinates are in payload_dict["x"]/["y"] directly (not enriched).
+        # player_id is in payload_dict["player_id"].
+        for ts, atype, adict in s._actions:
+            pid = adict.get("player_id")
+            if pid in (1, 2):
+                apm_ts[str(pid)].append(ts)
+
+            ids = adict.get("object_ids")
+            x, y = adict.get("x"), adict.get("y")
+            if atype in MOVE_OR_BUILD and x is not None and ids:
+                commands.append({"t": ts, "type": "move", "ids": ids,
+                                 "x": x, "y": y, "p": pid})
+            elif atype is ActionEnum.DELETE and ids:
+                commands.append({"t": ts, "type": "delete", "ids": ids})
+            elif atype is ActionEnum.RESIGN and pid:
+                commands.append({"t": ts, "type": "resign", "p": pid})
+
+        # Age-ups: in-game chat messages parsed as Chat.AGE type.
+        # chat["age"] is an Age enum; chat["timestamp"] is ms int; chat["player_number"] is int.
+        for chat in s.get_chat():
+            if chat.get("type") is not ChatType.AGE:
+                continue
+            age_enum = chat.get("age")
+            aname    = AGE_MAP.get(age_enum.name if age_enum else "", "")
+            pid      = chat.get("player_number")
+            ts       = chat.get("timestamp", 0)
             if pid and aname:
                 commands.append({"t": ts, "type": "age_up", "p": pid, "age": aname})
 
@@ -760,6 +1112,30 @@ const APMCalc = {
 // 9. UI & EVENTS
 // ============================================================
 const UI = {
+    bindKeys() {
+        // Space = play/pause; ←/→ = scrub ±10 s. Guard: no-op until a replay is loaded.
+        // Ignore when focus is inside an input to avoid hijacking the file input or range.
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT') return;
+            if (!AgeVisState.rawPayload)       return;
+            if (e.key === ' ' || e.code === 'Space') {
+                e.preventDefault();
+                UI.togglePlay();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                AgeVisState.playback.currentTime = Math.max(0, AgeVisState.playback.currentTime - 10000);
+                document.getElementById('timeline').value = AgeVisState.playback.currentTime;
+                Render.drawFrame(AgeVisState.playback.currentTime);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                const cap = AgeVisState.rawPayload.duration;
+                AgeVisState.playback.currentTime = Math.min(cap, AgeVisState.playback.currentTime + 10000);
+                document.getElementById('timeline').value = AgeVisState.playback.currentTime;
+                Render.drawFrame(AgeVisState.playback.currentTime);
+            }
+        });
+    },
+
     bindDropzone() {
         const dz        = document.getElementById('dropzone');
         const fileInput = document.getElementById('file-input');
@@ -780,7 +1156,12 @@ const UI = {
     },
 
     initPlayback() {
-        const tl  = document.getElementById('timeline');
+        // Clone timeline to drop stale listeners from previous replay — same pattern as _rewire.
+        // Raw addEventListener here (vs _rewire) was leaking one listener per replay load.
+        const oldTl = document.getElementById('timeline');
+        const tl    = oldTl.cloneNode(true);
+        oldTl.parentNode.replaceChild(tl, oldTl);
+
         const dur = AgeVisState.rawPayload.duration;
         tl.max = dur; tl.disabled = false; tl.value = 0;
 
